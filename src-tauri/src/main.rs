@@ -1,4 +1,4 @@
-// Sett — local-first, Warp-styled terminal for Claude Code vibe coders.
+// DevCLI — local-first, Warp-styled terminal for Claude Code vibe coders.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod agents;
@@ -25,9 +25,9 @@ struct Pty {
 
 pub struct AppState {
     ptys: Mutex<HashMap<String, Pty>>,
-    /// prompts saved in the current project folder (<cwd>/.sett)
+    /// prompts saved in the current project folder (<cwd>/.devcli)
     pub project: Mutex<Vault>,
-    /// prompts shared across every project (~/.sett)
+    /// prompts shared across every project (~/.devcli)
     pub global: Mutex<Vault>,
 }
 
@@ -36,12 +36,12 @@ impl AppState {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
         let project = Vault::open(&cwd, "project").unwrap_or_else(|e| {
-            eprintln!("[sett] project vault failed: {e}");
-            Vault::open(&std::env::temp_dir().join("sett-proj"), "project").expect("tmp vault")
+            eprintln!("[devcli] project vault failed: {e}");
+            Vault::open(&std::env::temp_dir().join("devcli-proj"), "project").expect("tmp vault")
         });
         let global = Vault::open(&home, "global").unwrap_or_else(|e| {
-            eprintln!("[sett] global vault failed: {e}");
-            Vault::open(&std::env::temp_dir().join("sett-global"), "global").expect("tmp vault")
+            eprintln!("[devcli] global vault failed: {e}");
+            Vault::open(&std::env::temp_dir().join("devcli-global"), "global").expect("tmp vault")
         });
         AppState {
             ptys: Mutex::new(HashMap::new()),
@@ -445,5 +445,5 @@ fn main() {
             agents::skills_list,
         ])
         .run(tauri::generate_context!())
-        .expect("error while running Sett");
+        .expect("error while running DevCLI");
 }

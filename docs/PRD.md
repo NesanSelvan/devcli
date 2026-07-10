@@ -1,4 +1,4 @@
-# Sett — Product Requirements
+# DevCLI — Product Requirements
 
 ## 1. Problem
 
@@ -35,7 +35,7 @@ Non-goal: enterprise SSO, cloud multi-tenant, or replacing the IDE. Terminal-fir
 - Warp-style block terminal (real PTY, real shell).
 - Claude Code launch + JSONL session tailing → block rendering.
 - Prompt vault: auto-capture, git commit, full-text search, tags.
-- `sett share` / `sett import` prompt-pack format.
+- `devcli share` / `devcli import` prompt-pack format.
 - Session timeline / replay view.
 - Inline git-diff overlay per agent-touched file + revert.
 - Agent/tool blocks (collapsible) + live todo checklist.
@@ -50,19 +50,19 @@ Non-goal: enterprise SSO, cloud multi-tenant, or replacing the IDE. Terminal-fir
 ## 5. Key user flows
 
 **Capture & reuse a prompt**
-1. User types a prompt to Claude Code in Sett.
-2. Sett records it → `.sett/prompts/<slug>.md` + git commit + SQLite index.
+1. User types a prompt to Claude Code in DevCLI.
+2. DevCLI records it → `.devcli/prompts/<slug>.md` + git commit + SQLite index.
 3. User later `Cmd-K` → searches vault → re-runs or edits a saved prompt.
 
 **Review an agent run**
 1. Claude spawns a subagent / edits files.
-2. Sett collapses the run into an **agent block** with a diff summary.
+2. DevCLI collapses the run into an **agent block** with a diff summary.
 3. User expands → sees per-file before/after → clicks **Revert** on one hunk.
 
 **Share a prompt-pack**
 1. User tags a set of prompts `#nextjs-setup`.
-2. `sett share nextjs-setup` → exports a self-contained repo (prompts + metadata).
-3. Another dev `sett import <url>` → prompts appear in their vault.
+2. `devcli share nextjs-setup` → exports a self-contained repo (prompts + metadata).
+3. Another dev `devcli import <url>` → prompts appear in their vault.
 
 ## 6. Requirements
 

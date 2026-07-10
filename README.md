@@ -1,10 +1,9 @@
-# Sett
+# DevCLI
 
 > Local-first, Warp-styled terminal built for Claude Code vibe coders.
 > Every prompt saved. Every session git-versioned. Every agent run rendered beautiful.
 > Share prompt-packs with other developers.
 
-**Name is a placeholder** — a "sett" is a badger's home (dug, structured, layered). Swap freely.
 
 ## Why
 
@@ -13,11 +12,11 @@ The market splits in two and nobody bridges it:
 - **AI terminals** (Warp, Wave, Ghostty+tmux) — pretty, block-based, but agent-agnostic. They don't understand Claude Code's sessions, agents, or tool calls.
 - **Claude Code GUIs** (opcode, Conductor, Nimbalyst, Vibe Kanban) — understand sessions, but are desktop apps, not terminals. You lose the raw shell.
 
-Sett is a **real terminal** that natively renders Claude Code's inner life (agents, tool calls, todos, diffs) as beautiful blocks — while keeping full shell power. Local-first, **no forced login** (the #1 complaint against Warp).
+DevCLI is a **real terminal** that natively renders Claude Code's inner life (agents, tool calls, todos, diffs) as beautiful blocks — while keeping full shell power. Local-first, **no forced login** (the #1 complaint against Warp).
 
 ## Five headline features
 
-1. **Prompt vault (git-native)** — every prompt auto-committed to `.sett/prompts/`. Searchable, taggable, replayable. `sett share` exports a prompt-pack repo others import.
+1. **Prompt vault (git-native)** — every prompt auto-committed to `.devcli/prompts/`. Searchable, taggable, replayable. `sett share` exports a prompt-pack repo others import.
 2. **Session timeline** — parse Claude Code JSONL into a scrubber: prompts, tool calls, file diffs, agent spawns. A replay, not a raw log.
 3. **Agent blocks** — subagent/tool runs collapse into labeled cards. Todos render as a live checklist.
 4. **Git-diff overlay** — inline before/after per touched file, one-click revert.

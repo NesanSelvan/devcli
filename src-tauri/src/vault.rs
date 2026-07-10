@@ -1,15 +1,15 @@
-// Sett — git-native prompt vault.
+// DevCLI — git-native prompt vault.
 //
 // STORAGE LAYOUT (identical for repo-local and global; see docs/PROMPT-STORAGE.md):
 //
-//   <base>/.sett/                 base = <repo> for project scope, ~ for global
+//   <base>/.devcli/                 base = <repo> for project scope, ~ for global
 //   ├── prompts/
 //   │   ├── README.md             explains the format
 //   │   └── <slug>.md             one prompt per file, YAML frontmatter + body
-//   ├── sett.db                   SQLite index over the files (fast search)
+//   ├── devcli.db                   SQLite index over the files (fast search)
 //   └── .git/                     every save is a commit
 //
-// The .md files are the source of truth and are git-tracked; sett.db is a
+// The .md files are the source of truth and are git-tracked; devcli.db is a
 // rebuildable index. A prompt file looks like:
 //
 //   ---
@@ -36,7 +36,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 pub struct Vault {
-    root: PathBuf, // <base>/.sett
+    root: PathBuf, // <base>/.devcli
     base: PathBuf, // <base> (repo dir, or home for global)
     scope: String, // "project" | "global"
     conn: Connection,
@@ -75,10 +75,10 @@ pub struct PromptHit {
     pub tags: Vec<String>,
 }
 
-const README: &str = "# Sett prompts
+const README: &str = "# DevCLI prompts
 
 Each `*.md` file is one saved prompt with YAML frontmatter, git-tracked.
-`sett.db` is a rebuildable SQLite index over these files — the files win.
+`devcli.db` is a rebuildable SQLite index over these files — the files win.
 
 Frontmatter fields: `id`, `title`, `slug`, `scope`, `source`, `session`,
 `project`, `tags`, `created_at`, `updated_at`, `uses`.
@@ -274,7 +274,7 @@ impl Vault {
         let _ = run_git(&self.root, &["add", &rel]);
         let _ = run_git(
             &self.root,
-            &["-c", "user.name=Sett", "-c", "user.email=sett@local",
+            &["-c", "user.name=DevCLI", "-c", "user.email=devcli@local",
               "commit", "-q", "-m", &format!("{source}: {}", truncate(&title, 50))],
         );
         Ok(())
@@ -339,7 +339,7 @@ impl Vault {
         let _ = run_git(&self.root, &["add", "-A"]);
         let _ = run_git(
             &self.root,
-            &["-c", "user.name=Sett", "-c", "user.email=sett@local", "commit", "-q", "-m", "remove prompt"],
+            &["-c", "user.name=DevCLI", "-c", "user.email=devcli@local", "commit", "-q", "-m", "remove prompt"],
         );
         Ok(())
     }
@@ -433,7 +433,7 @@ impl Vault {
         let name = if tag.trim().is_empty() { "vault" } else { tag };
         std::fs::write(
             dest.join("pack.toml"),
-            format!("name = \"{name}\"\ndescription = \"Sett prompt-pack\"\nversion = \"1\"\ncount = {count}\n"),
+            format!("name = \"{name}\"\ndescription = \"DevCLI prompt-pack\"\nversion = \"1\"\ncount = {count}\n"),
         )
         .map_err(|e| e.to_string())?;
         Ok(count)

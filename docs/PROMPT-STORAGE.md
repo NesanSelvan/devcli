@@ -1,14 +1,14 @@
-# Sett — Prompt storage
+# DevCLI — Prompt storage
 
-How Sett stores a prompt. Same layout for **project** (this repo) and **global**
+How DevCLI stores a prompt. Same layout for **project** (this repo) and **global**
 (across every repo); only the base directory differs.
 
 ## Where
 
 | Scope | Base | Vault path |
 |---|---|---|
-| project | the repo you opened Sett in | `<repo>/.sett/` |
-| global | your home | `~/.sett/` |
+| project | the repo you opened DevCLI in | `<repo>/.devcli/` |
+| global | your home | `~/.devcli/` |
 
 Both are real git repos — every save is a commit, so history is auditable and
 the folder is portable (copy it, push it, share it).
@@ -16,16 +16,16 @@ the folder is portable (copy it, push it, share it).
 ## Layout
 
 ```
-<base>/.sett/
+<base>/.devcli/
 ├── prompts/
 │   ├── README.md              # explains the format (written on init)
 │   └── <slug>.md              # one prompt per file — source of truth, git-tracked
-├── sett.db                    # SQLite index over the files (fast search; rebuildable)
+├── devcli.db                    # SQLite index over the files (fast search; rebuildable)
 └── .git/                      # one commit per saved prompt
 ```
 
-The `.md` files are authoritative. `sett.db` is just an index for instant search
-and can be regenerated from the files. `.gitignore` excludes `sett.db`.
+The `.md` files are authoritative. `devcli.db` is just an index for instant search
+and can be regenerated from the files. `.gitignore` excludes `devcli.db`.
 
 ## File format
 
@@ -71,7 +71,7 @@ mypack/
 into your vault as `source: imported` (dedup by hash). A pack is just a folder or
 git repo, so sharing = push/clone.
 
-## Index schema (sett.db)
+## Index schema (devcli.db)
 
 ```sql
 prompts(

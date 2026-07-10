@@ -1,4 +1,4 @@
-# Sett — Visual Design (Warp-style)
+# DevCLI — Visual Design (Warp-style)
 
 Goal: the polish and font feel of warp.dev, adapted to a Claude-Code-native block terminal.
 
@@ -38,7 +38,7 @@ Light mode later; dark is the hero.
 
 ## 3. Blocks (the core visual metaphor)
 
-Each command + its output is a **card**, like Warp's blocks — but Sett adds Claude-Code block types.
+Each command + its output is a **card**, like Warp's blocks — but DevCLI adds Claude-Code block types.
 
 ```
 ┌─ prompt ─────────────────────────────────┐   ← accent-1 left bar
@@ -82,7 +82,7 @@ Rules:
 
 ```
 ┌───────────────────────────────────────────────┐
-│  ● ● ●   sett — ~/projects/app     [session ▾] │  titlebar
+│  ● ● ●   devcli — ~/projects/app     [session ▾] │  titlebar
 ├──────────┬────────────────────────────────────┤
 │ vault    │  block list (scroll)                │
 │ #auth    │                                     │

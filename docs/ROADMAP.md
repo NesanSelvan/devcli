@@ -1,4 +1,4 @@
-# Sett — Roadmap
+# DevCLI — Roadmap
 
 Phased so each milestone is usable on its own. No milestone depends on cloud.
 
@@ -37,7 +37,7 @@ Make it Claude-Code-native.
 - **Exit:** review any agent run and revert individual changes fast.
 
 ## Phase 5 — Share
-- [ ] `vault/pack.rs` — `sett share <tag>` export, `sett import <src>` merge.
+- [ ] `vault/pack.rs` — `devcli share <tag>` export, `devcli import <src>` merge.
 - [ ] Pack manifest (`pack.toml`), content-hash de-dup.
 - [ ] (Optional) a simple public index / gallery for prompt-packs.
 - **Exit:** developers exchange prompt-packs as repos.

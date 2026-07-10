@@ -1,4 +1,4 @@
-// Sett — Claude Code session awareness.
+// DevCLI — Claude Code session awareness.
 // Tails ~/.claude/projects/**/*.jsonl (read-only), parses each line into typed
 // SessionEvents, streams them to the UI, and captures user prompts into the vault.
 use std::collections::HashMap;
@@ -340,7 +340,7 @@ pub fn session_load(path: String) -> Result<Vec<SessionEvent>, String> {
     Ok(out)
 }
 
-// ---- prompt-folder watching (project <cwd>/.sett/prompts + global ~/.sett/prompts) ----
+// ---- prompt-folder watching (project <cwd>/.devcli/prompts + global ~/.devcli/prompts) ----
 // Anything dropped here — saved by the user, written by Claude, or from a pack —
 // gets indexed and shown in the Prompts panel.
 

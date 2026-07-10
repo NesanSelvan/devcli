@@ -1,11 +1,11 @@
-# Sett — Architecture
+# DevCLI — Architecture
 
 ## 1. Principles
 
 - **Local-first.** SQLite + git on disk. No server in the loop. Network only on explicit `share`/`sync`.
 - **Efficient.** System webview (Tauri), not Electron. Reuse the Alacritty VTE crate, don't hand-roll a terminal.
 - **Real terminal, not a wrapper.** A true PTY hosts a real shell; Claude Code runs inside it like anywhere else.
-- **Observe, don't intercept.** Claude Code already writes structured JSONL. Sett *tails* it for the pretty view — it never needs to fake or proxy the agent protocol.
+- **Observe, don't intercept.** Claude Code already writes structured JSONL. DevCLI *tails* it for the pretty view — it never needs to fake or proxy the agent protocol.
 - **Fail soft.** Unknown JSONL event types render as raw fallback blocks, never crash.
 
 ## 2. High-level diagram
@@ -35,8 +35,8 @@
 └──────────────────────────────────────────────────────────┘
                          ▼ disk
    ~/.claude/projects/**   (read-only tail)
-   <repo>/.sett/prompts/   (git-tracked prompt vault)
-   <repo>/.sett/sett.db    (SQLite index + FTS)
+   <repo>/.devcli/prompts/   (git-tracked prompt vault)
+   <repo>/.devcli/devcli.db    (SQLite index + FTS)
 ```
 
 ## 3. Rust module tree (`src-tauri/src/`)
@@ -57,7 +57,7 @@ session/
 vault/
   mod.rs           # capture prompt -> file + git commit + index row
   store.rs         # SQLite (rusqlite) schema + FTS5 queries
-  git.rs           # git2-rs: init .sett, commit, log
+  git.rs           # git2-rs: init .devcli, commit, log
   pack.rs          # share/import: manifest + folder <-> tarball/repo
 diff/
   mod.rs           # git2 status/diff for agent-touched files
@@ -103,7 +103,7 @@ CREATE TABLE tags (prompt_id INTEGER, tag TEXT);
 CREATE VIRTUAL TABLE prompts_fts USING fts5(text, content='prompts', content_rowid='id');
 ```
 
-On disk each prompt is also a file: `.sett/prompts/<slug>.md` with YAML frontmatter (tags, session, timestamp). File is source of truth; SQLite is the index. Git versions the folder.
+On disk each prompt is also a file: `.devcli/prompts/<slug>.md` with YAML frontmatter (tags, session, timestamp). File is source of truth; SQLite is the index. Git versions the folder.
 
 ### Prompt-pack (share format)
 
@@ -115,7 +115,7 @@ mypack/
     add-auth.md
 ```
 
-`sett share <tag>` collects tagged prompts into this layout (a plain git repo or tarball). `sett import <path|url>` merges them into the local vault, de-duping by content hash.
+`devcli share <tag>` collects tagged prompts into this layout (a plain git repo or tarball). `devcli import <path|url>` merges them into the local vault, de-duping by content hash.
 
 ## 5. Key flows (sequence)
 
@@ -174,7 +174,7 @@ Events emitted to UI: `block.append`, `block.update`, `prompt.saved`, `session.e
 
 - No network client compiled into the default build path except the opt-in `sync` feature (Cargo feature flag, off).
 - No analytics SDK. `config.telemetry = false` and there's no code path to flip it remotely.
-- `sett` reads `~/.claude/projects` read-only. Writes only under `<repo>/.sett/`.
+- `sett` reads `~/.claude/projects` read-only. Writes only under `<repo>/.devcli/`.
 - Core intended open-source so the zero-egress claim is auditable.
 
 ## 9. Build / tooling

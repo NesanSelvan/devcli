@@ -1,4 +1,4 @@
-// Sett — frontend: iTerm2/Ghostty-style split-tree terminals + Claude Code panel.
+// DevCLI — frontend: iTerm2/Ghostty-style split-tree terminals + Claude Code panel.
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebglAddon } from "@xterm/addon-webgl";
@@ -393,6 +393,8 @@ function buildPromptRow(h) {
   delBtn.title = "Delete this prompt";
   delBtn.addEventListener("click", async (e) => {
     e.stopPropagation();
+    const ok = await confirmDialog("Delete this prompt?", h.title || (h.text || "").split("\n")[0].slice(0, 60), "Delete", delBtn);
+    if (!ok) return;
     await invoke("prompts_delete", { scope: h.scope, slug: h.slug }).catch(() => {});
     refreshPrompts($("#prompts-search").value);
     status("deleted");
@@ -831,7 +833,13 @@ async function refreshNotes() {
     const pin = el("button", "row-ico" + (n.pinned ? " active" : ""), "⊙"); pin.title = "pin";
     pin.addEventListener("click", async (e) => { e.stopPropagation(); await invoke("notes_pin", { id: n.id }).catch(() => {}); refreshNotes(); });
     const del = el("button", "row-ico row-del", "✕"); del.title = "delete";
-    del.addEventListener("click", async (e) => { e.stopPropagation(); await invoke("notes_delete", { id: n.id }).catch(() => {}); refreshNotes(); });
+    del.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      const ok = await confirmDialog("Delete this note?", (n.text || "").split("\n")[0].slice(0, 60), "Delete", del);
+      if (!ok) return;
+      await invoke("notes_delete", { id: n.id }).catch(() => {});
+      refreshNotes();
+    });
     head.append(drag, chk, col, titleEl, pin, del);
     card.appendChild(head);
 
@@ -956,5 +964,5 @@ async function init() {
 }
 
 init().catch((err) => {
-  document.body.textContent = "Sett failed to start: " + err;
+  document.body.textContent = "DevCLI failed to start: " + err;
 });

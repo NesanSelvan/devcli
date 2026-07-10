@@ -1,4 +1,4 @@
-// Sett — surface the user's Claude Code agents and skills in the side panel.
+// DevCLI — surface the user's Claude Code agents and skills in the side panel.
 // Reads markdown frontmatter (name/description) from the global (~/.claude) and
 // project (<cwd>/.claude) locations.
 use std::path::Path;
