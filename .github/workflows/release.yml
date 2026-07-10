@@ -1,0 +1,47 @@
+name: release
+
+# Push a version tag (e.g. `git tag v0.1.1 && git push origin v0.1.1`)
+# → builds, signs, and publishes a GitHub Release with the DMG + updater
+# artifacts + latest.json. Installed apps then auto-update on next launch.
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  release:
+    runs-on: macos-latest # Apple Silicon (aarch64)
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+
+      - run: pnpm install --no-frozen-lockfile
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "DevCLI ${{ github.ref_name }}"
+          releaseBody: "DevCLI ${{ github.ref_name }}. Download the .dmg (macOS, Apple Silicon). Installed apps auto-update from this release."
+          releaseDraft: false
+          prerelease: false
+          includeUpdaterJson: true
