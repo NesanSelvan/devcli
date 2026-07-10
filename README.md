@@ -1,40 +1,110 @@
-# DevCLI
+<div align="center">
 
-> Local-first, Warp-styled terminal built for Claude Code vibe coders.
-> Every prompt saved. Every session git-versioned. Every agent run rendered beautiful.
-> Share prompt-packs with other developers.
+# ⌁ DevCLI
 
+**A local-first terminal built for the Claude Code era.**
 
-## Why
+Your terminal, plus a Claude-native side panel — a git-backed prompt vault, your agents & skills & MCP servers at a glance, notes, and a one-key **Enhance** that turns rough ideas into sharp prompts.
 
-The market splits in two and nobody bridges it:
+[![release](https://img.shields.io/github/v/release/NesanSelvan/devcli?color=2DD4BF&label=release)](https://github.com/NesanSelvan/devcli/releases/latest)
+[![build](https://img.shields.io/github/actions/workflow/status/NesanSelvan/devcli/release.yml?label=build)](https://github.com/NesanSelvan/devcli/actions)
+[![platform](https://img.shields.io/badge/macOS-Apple%20Silicon-0D1117)](https://github.com/NesanSelvan/devcli/releases/latest)
+[![stack](https://img.shields.io/badge/Rust%20%2B%20Tauri%20%2B%20xterm-2DD4BF)](#-tech)
 
-- **AI terminals** (Warp, Wave, Ghostty+tmux) — pretty, block-based, but agent-agnostic. They don't understand Claude Code's sessions, agents, or tool calls.
-- **Claude Code GUIs** (opcode, Conductor, Nimbalyst, Vibe Kanban) — understand sessions, but are desktop apps, not terminals. You lose the raw shell.
+</div>
 
-DevCLI is a **real terminal** that natively renders Claude Code's inner life (agents, tool calls, todos, diffs) as beautiful blocks — while keeping full shell power. Local-first, **no forced login** (the #1 complaint against Warp).
+---
 
-## Five headline features
+## ✨ Why
 
-1. **Prompt vault (git-native)** — every prompt auto-committed to `.devcli/prompts/`. Searchable, taggable, replayable. `sett share` exports a prompt-pack repo others import.
-2. **Session timeline** — parse Claude Code JSONL into a scrubber: prompts, tool calls, file diffs, agent spawns. A replay, not a raw log.
-3. **Agent blocks** — subagent/tool runs collapse into labeled cards. Todos render as a live checklist.
-4. **Git-diff overlay** — inline before/after per touched file, one-click revert.
-5. **Local-first, zero-login** — SQLite + git, no server. Optional sync later.
+Two worlds never met: **AI terminals** (fast, pretty, but agent-blind) and **Claude Code GUIs** (agent-aware, but not a real terminal). DevCLI is both — a real shell **and** a panel that understands your Claude Code workflow. Local-first, no login, cross-platform.
 
-## Stack
+---
 
-Rust core + Tauri v2 (system webview) + Solid/Svelte UI. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+## 🚀 Features
 
-Chosen for **resource efficiency**: ~15 MB webview baseline vs Electron's ~150 MB. Directly beats Warp on RAM.
+| | |
+|---|---|
+| 🖥️ **Real terminal** | True PTY + your shell, GPU-accelerated rendering (xterm WebGL), 100k scrollback. |
+| 🗂️ **Tabs** | One shell per tab — **rename** (double-click), **pin**, **color**, right-click menu. |
+| 💬 **Prompt vault** | Every saved prompt is a git-tracked `.md` file. Search, tag into **groups**, re-use, share. |
+| ✨ **Enhance & Refine** | Turn a rough note into a clean prompt via your local `claude` — then iterate with a change instruction. |
+| 🤖 **Agents · Skills · MCP** | Your `~/.claude` (and project `.claude`) agents, skills, and MCP servers — searchable, groupable, **double-click to preview**. |
+| 📝 **Notes** | Notes / tasks with pin, minimize, drag-to-reorder, and clickable links. |
+| 📁 **Folder-aware** | The panel **follows your terminal's `cd`** — prompts, notes, agents auto-scope to the project you're in. |
+| 🎨 **Themes** | Clean light + dark, teal accent. |
+| ⬆️ **Auto-update** | Installed apps update themselves from GitHub Releases (signed). |
 
-## Docs
+---
 
-- [docs/PRD.md](docs/PRD.md) — product requirements, personas, scope
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — system design, data model, module tree
-- [docs/DESIGN.md](docs/DESIGN.md) — Warp-style visual system (fonts, palette, blocks)
-- [docs/ROADMAP.md](docs/ROADMAP.md) — phased milestones
+## 📦 Install
 
-## Status
+Download the latest **`.dmg`** from **[Releases](https://github.com/NesanSelvan/devcli/releases/latest)** (macOS, Apple Silicon), open it, drag DevCLI to Applications.
 
-Pre-code. Architecture + scaffold only.
+> After that, DevCLI keeps itself up to date — new releases install on the next launch.
+
+---
+
+## ⌨️ Shortcuts
+
+| Key | Action |
+|---|---|
+| `⌘T` | New terminal tab |
+| `⌘W` | Close tab |
+| `⌘1…9` | Switch to tab N |
+| `⌘E` | Enhance the prompt you're typing (in the terminal) |
+| `⌘B` | Toggle the side panel |
+
+Double-click a tab to **rename**, right-click for **pin / color / close**. Double-click an agent or skill to **preview** its file.
+
+---
+
+## 🗃️ How prompts are stored
+
+Each saved prompt is a self-describing markdown file, git-versioned — the files are the source of truth, SQLite is just a search index.
+
+```
+<project>/.devcli/prompts/<slug>.md   # per-repo prompts
+~/.devcli/prompts/<slug>.md           # global prompts
+```
+
+Full spec → [`docs/PROMPT-STORAGE.md`](docs/PROMPT-STORAGE.md).
+
+---
+
+## 🛠️ Tech
+
+**Rust + Tauri v2** (native WebView — light, no bundled Chromium) · **xterm.js + WebGL** terminal · **SQLite + git** storage · **Vite** UI.
+
+Idle footprint ~78 MB (release). Design notes in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) · [`docs/DESIGN.md`](docs/DESIGN.md) · [`docs/PRD.md`](docs/PRD.md).
+
+---
+
+## 💻 Develop
+
+```bash
+pnpm install
+pnpm tauri dev      # run the app (hot-reload UI)
+pnpm tauri build    # produce a .dmg / .app
+```
+
+Requires Rust, Node 20+, pnpm.
+
+---
+
+## 🚢 Release
+
+Push a version tag — CI (`.github/workflows/release.yml`) builds, signs, and publishes the GitHub Release + `latest.json`:
+
+```bash
+# bump version in src-tauri/tauri.conf.json and src-tauri/Cargo.toml
+git tag v0.1.2 && git push origin v0.1.2
+```
+
+Installed apps auto-update on next launch. *(Signing uses the `TAURI_SIGNING_PRIVATE_KEY` repo secret — keep the private key safe; without it, updates break.)*
+
+---
+
+<div align="center">
+<sub>Built with Rust, Tauri, and Claude Code.</sub>
+</div>
