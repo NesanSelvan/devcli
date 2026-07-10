@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>DevCLI</title>
+    <link rel="stylesheet" href="/src/styles/theme.css" />
+  </head>
+  <body>
+    <div id="app">
+      <header class="appbar" data-tauri-drag-region>
+        <div class="term-tabs" id="term-tabs"></div>
+        <button class="tab-add" id="tab-add" title="New terminal (⌘T)">＋</button>
+      </header>
+
+      <div class="workspace">
+        <div class="terms" id="terms"></div>
+
+        <aside class="panel" id="panel">
+          <div class="panel-tabs">
+            <button class="tab active" data-tab="prompts">Prompts</button>
+            <button class="tab" data-tab="agents">Agents</button>
+            <button class="tab" data-tab="skills">Skills</button>
+            <button class="tab" data-tab="mcp">MCP</button>
+            <button class="tab" data-tab="notes">Notes</button>
+            <span class="tabs-spacer"></span>
+            <button class="tab-ico" id="btn-theme" title="Light / dark">☾</button>
+            <button class="tab-collapse" id="btn-collapse" title="Minimize panel">✕</button>
+          </div>
+          <div class="panel-body">
+            <div class="tabpane" id="pane-prompts">
+              <div class="compose">
+                <span id="base-chip" class="base-chip hidden">base: <span id="base-title"></span><button id="base-clear" title="clear base">✕</button></span>
+                <textarea id="compose-input" class="field compose-input"
+                  placeholder="Write a new prompt here… then ✨ Enhance, and Save."></textarea>
+                <div class="compose-actions">
+                  <button id="compose-enhance" class="btn btn-sm accent-btn">✨ Enhance</button>
+                  <button id="compose-save-proj" class="btn btn-sm">Save · folder</button>
+                  <button id="compose-save-glob" class="btn btn-sm">Save · global</button>
+                  <button id="compose-insert" class="btn btn-sm">→ Terminal</button>
+                  <button id="compose-refine-toggle" class="btn btn-sm" title="Refine / change it">↻</button>
+                </div>
+                <div class="compose-refine hidden" id="compose-refine-row">
+                  <input id="compose-refine" class="field" placeholder="Change it: 'shorter', 'add error handling'… ↵" />
+                  <button id="compose-refine-btn" class="btn btn-sm">↻ Refine</button>
+                </div>
+              </div>
+              <input id="prompts-search" class="field" placeholder="search saved prompts…" />
+              <div id="prompts-list" class="vault-list"></div>
+            </div>
+
+            <div class="tabpane hidden" id="pane-agents">
+              <input id="agents-search" class="field" placeholder="search agents…" />
+              <div id="agents-list" class="vault-list"></div>
+            </div>
+
+            <div class="tabpane hidden" id="pane-skills">
+              <input id="skills-search" class="field" placeholder="search skills…" />
+              <div class="hint peek-hint">Single-click to insert · double-click to preview the file</div>
+              <div id="skills-list" class="vault-list"></div>
+            </div>
+
+            <div class="tabpane hidden" id="pane-mcp">
+              <input id="mcp-search" class="field" placeholder="search MCP servers…" />
+              <div id="mcp-list" class="vault-list"></div>
+            </div>
+
+            <div class="tabpane hidden" id="pane-notes">
+              <div class="note-compose">
+                <textarea id="note-text" class="field note-input" placeholder="Add a note or task… paste links and they turn clickable. ⌘Enter to add."></textarea>
+                <div class="note-actions">
+                  <button id="note-enhance" class="btn btn-sm accent-btn">✨ Enhance</button>
+                  <button id="note-add" class="btn btn-sm">Add note</button>
+                  <button id="note-refine-toggle" class="btn btn-sm" title="Refine / change it">↻</button>
+                </div>
+                <div class="compose-refine hidden" id="note-refine-row">
+                  <input id="note-refine" class="field" placeholder="Change it… ↵" />
+                  <button id="note-refine-btn" class="btn btn-sm">↻ Refine</button>
+                </div>
+              </div>
+              <div id="notes-list" class="vault-list"></div>
+            </div>
+          </div>
+        </aside>
+
+        <button class="panel-reopen hidden" id="panel-reopen" title="Show panel">▐</button>
+      </div>
+    </div>
+    <div id="status" class="status-toast"></div>
+    <div id="ctx" class="ctx hidden"></div>
+    <div id="peek" class="peek hidden">
+      <div class="peek-card">
+        <div class="peek-head">
+          <span id="peek-title"></span>
+          <button id="peek-pin" class="row-ico" title="Pin open">⊙</button>
+          <button id="peek-close" class="row-ico" title="Close">✕</button>
+        </div>
+        <div id="peek-body" class="peek-body"></div>
+      </div>
+    </div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

@@ -1,0 +1,12 @@
+# rust
+/src-tauri/target
+# node
+node_modules
+dist
+# DevCLI prompt/notes vaults — local user data (and dev test data). Never publish.
+**/.devcli/
+# generated icon set is kept; the 1024 source is fine to track
+# os
+.DS_Store
+*.log
+**/.sett/
