@@ -101,6 +101,7 @@ function showActive() {
     p.term.focus();
   }
   document.querySelectorAll(".term-tab").forEach((t) => t.classList.toggle("active", t.dataset.id === activeId));
+  if (typeof syncProjectDir === "function") syncProjectDir(); // instant folder sync on tab switch
 }
 
 // top bar: one tab per terminal — rename, pin, color, close

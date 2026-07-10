@@ -34,11 +34,21 @@ pub struct AppState {
     pub global: Mutex<Vault>,
 }
 
+fn lastdir_file() -> Option<PathBuf> {
+    dirs::home_dir().map(|h| h.join(".devcli").join("lastdir"))
+}
+
 impl AppState {
     fn new() -> Self {
-        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-        let project = Vault::open(&cwd, "project").unwrap_or_else(|e| {
+        let launch = std::env::current_dir().unwrap_or_else(|_| home.clone());
+        // start in the last folder used (persisted), else the launch dir
+        let start = lastdir_file()
+            .and_then(|f| std::fs::read_to_string(f).ok())
+            .map(|s| PathBuf::from(s.trim()))
+            .filter(|p| p.is_dir())
+            .unwrap_or(launch);
+        let project = Vault::open(&start, "project").unwrap_or_else(|e| {
             eprintln!("[devcli] project vault failed: {e}");
             Vault::open(&std::env::temp_dir().join("devcli-proj"), "project").expect("tmp vault")
         });
@@ -48,15 +58,21 @@ impl AppState {
         });
         AppState {
             ptys: Mutex::new(HashMap::new()),
-            project_dir: Mutex::new(cwd),
+            project_dir: Mutex::new(start),
             project: Mutex::new(project),
             global: Mutex::new(global),
         }
     }
 
-    /// Re-scope the panel to `dir`: re-open the project vault + index its prompts.
+    /// Re-scope the panel to `dir`: re-open the project vault, index prompts, remember it.
     fn set_dir(&self, dir: &std::path::Path) {
         *self.project_dir.lock().unwrap() = dir.to_path_buf();
+        if let Some(f) = lastdir_file() {
+            if let Some(parent) = f.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::write(&f, dir.to_string_lossy().as_bytes());
+        }
         if let Ok(mut v) = Vault::open(dir, "project") {
             v.ingest_dir();
             *self.project.lock().unwrap() = v;
@@ -96,9 +112,7 @@ fn pty_spawn(app: AppHandle, state: State<'_, AppState>, id: String, rows: u16, 
 
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
     let mut cmd = CommandBuilder::new(shell);
-    if let Ok(cwd) = std::env::current_dir() {
-        cmd.cwd(cwd);
-    }
+    cmd.cwd(state.dir()); // open new terminals in the last-used folder
     cmd.env("TERM", "xterm-256color");
 
     let mut child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
