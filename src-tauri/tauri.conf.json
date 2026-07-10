@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "DevCLI",
-  "version": "0.0.0",
-  "identifier": "dev.sett.app",
+  "version": "0.1.0",
+  "identifier": "dev.devcli.app",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:5173",
@@ -28,6 +28,15 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all"
+    "targets": "all",
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/NesanSelvan/devcli/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEUxODI3NDlEQ0IyM0VENDAKUldSQTdTUExuWFNDNFNJWVZNOUN1dGY1WUNZNmpFdnRTU3lFOHJoVG42bVlzTHhHeHFDMWZnQ28K"
+    }
   }
 }

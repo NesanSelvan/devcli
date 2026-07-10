@@ -5,6 +5,8 @@ import { WebglAddon } from "@xterm/addon-webgl";
 import "@xterm/xterm/css/xterm.css";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { check } from "@tauri-apps/plugin-updater";
+import { relaunch } from "@tauri-apps/plugin-process";
 
 // ---------- DOM helpers ----------
 const $ = (s) => document.querySelector(s);
@@ -894,9 +896,23 @@ function wireTabs() {
   });
 }
 
+// ---------- auto-update (from GitHub Releases) ----------
+async function checkForUpdates() {
+  try {
+    const update = await check();
+    if (update?.available) {
+      status(`update ${update.version} available — installing…`, true);
+      await update.downloadAndInstall();
+      status("update installed — restarting…");
+      await relaunch();
+    }
+  } catch (_) { /* offline, dev build, or no release yet — ignore */ }
+}
+
 // ---------- boot ----------
 async function init() {
   setTheme(currentTheme);
+  checkForUpdates(); // non-blocking; only does anything in a release build
 
   await listen("pty-data", (e) => panes.get(e.payload.id)?.term.write(new Uint8Array(e.payload.data)));
   await listen("pty-exit", (e) =>
