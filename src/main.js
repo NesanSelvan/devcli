@@ -909,6 +909,26 @@ async function checkForUpdates() {
   } catch (_) { /* offline, dev build, or no release yet — ignore */ }
 }
 
+// ---------- panel follows the active terminal's folder ----------
+let currentDir = null;
+function refreshActivePanel() {
+  const which = document.querySelector(".panel-tabs .tab.active")?.dataset.tab;
+  if (which === "prompts") refreshPrompts($("#prompts-search").value);
+  else if (which === "agents") refreshAgents();
+  else if (which === "skills") refreshSkills();
+  else if (which === "mcp") refreshMcp();
+  else if (which === "notes") refreshNotes();
+}
+async function syncProjectDir() {
+  const cwd = await invoke("pty_cwd", { id: activeId }).catch(() => null);
+  if (!cwd || cwd === currentDir) return;
+  currentDir = cwd;
+  await invoke("set_project_dir", { path: cwd }).catch(() => {});
+  $("#cwd-label").textContent = "📁 " + (cwd.split("/").filter(Boolean).pop() || cwd);
+  $("#cwd-label").title = cwd + " — the panel follows this folder";
+  refreshActivePanel();
+}
+
 // ---------- boot ----------
 async function init() {
   setTheme(currentTheme);
@@ -977,6 +997,8 @@ async function init() {
   });
 
   panes.get("1").term.focus();
+  setTimeout(syncProjectDir, 800);      // initial folder detect
+  setInterval(syncProjectDir, 1500);    // follow `cd` in the active terminal
 }
 
 init().catch((err) => {

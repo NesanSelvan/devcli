@@ -97,27 +97,23 @@ fn read_skills(dir: &Path, scope: &str, out: &mut Vec<Item>) {
 }
 
 #[tauri::command]
-pub fn agents_list() -> Vec<Item> {
+pub fn agents_list(state: tauri::State<'_, crate::AppState>) -> Vec<Item> {
     let mut out = Vec::new();
     if let Some(h) = dirs::home_dir() {
         read_agents(&h.join(".claude").join("agents"), "global", &mut out);
     }
-    if let Ok(cwd) = std::env::current_dir() {
-        read_agents(&cwd.join(".claude").join("agents"), "project", &mut out);
-    }
+    read_agents(&state.dir().join(".claude").join("agents"), "project", &mut out);
     out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     out
 }
 
 #[tauri::command]
-pub fn skills_list() -> Vec<Item> {
+pub fn skills_list(state: tauri::State<'_, crate::AppState>) -> Vec<Item> {
     let mut out = Vec::new();
     if let Some(h) = dirs::home_dir() {
         read_skills(&h.join(".claude").join("skills"), "global", &mut out);
     }
-    if let Ok(cwd) = std::env::current_dir() {
-        read_skills(&cwd.join(".claude").join("skills"), "project", &mut out);
-    }
+    read_skills(&state.dir().join(".claude").join("skills"), "project", &mut out);
     out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     out
 }

@@ -17,15 +17,18 @@ use tauri::{AppHandle, Emitter, State};
 
 use vault::{PromptHit, Vault};
 
-/// One live PTY: master (resize) + writer (input).
+/// One live PTY: master (resize) + writer (input) + the shell's pid.
 struct Pty {
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
+    child_pid: Option<u32>,
 }
 
 pub struct AppState {
     ptys: Mutex<HashMap<String, Pty>>,
-    /// prompts saved in the current project folder (<cwd>/.devcli)
+    /// the folder the panel is scoped to (follows the active terminal's cwd)
+    pub project_dir: Mutex<PathBuf>,
+    /// prompts saved in the current project folder (<dir>/.devcli)
     pub project: Mutex<Vault>,
     /// prompts shared across every project (~/.devcli)
     pub global: Mutex<Vault>,
@@ -45,9 +48,22 @@ impl AppState {
         });
         AppState {
             ptys: Mutex::new(HashMap::new()),
+            project_dir: Mutex::new(cwd),
             project: Mutex::new(project),
             global: Mutex::new(global),
         }
+    }
+
+    /// Re-scope the panel to `dir`: re-open the project vault + index its prompts.
+    fn set_dir(&self, dir: &std::path::Path) {
+        *self.project_dir.lock().unwrap() = dir.to_path_buf();
+        if let Ok(mut v) = Vault::open(dir, "project") {
+            v.ingest_dir();
+            *self.project.lock().unwrap() = v;
+        }
+    }
+    pub fn dir(&self) -> PathBuf {
+        self.project_dir.lock().unwrap().clone()
     }
 
     fn vault_for(&self, scope: &str) -> &Mutex<Vault> {
@@ -86,6 +102,7 @@ fn pty_spawn(app: AppHandle, state: State<'_, AppState>, id: String, rows: u16, 
     cmd.env("TERM", "xterm-256color");
 
     let mut child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
+    let child_pid = child.process_id();
     let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
     let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
 
@@ -93,7 +110,7 @@ fn pty_spawn(app: AppHandle, state: State<'_, AppState>, id: String, rows: u16, 
         .ptys
         .lock()
         .unwrap()
-        .insert(id.clone(), Pty { master: pair.master, writer });
+        .insert(id.clone(), Pty { master: pair.master, writer, child_pid });
 
     thread::spawn(move || {
         let mut buf = [0u8; 8192];
@@ -134,6 +151,39 @@ fn pty_resize(state: State<'_, AppState>, id: String, rows: u16, cols: u16) -> R
 #[tauri::command]
 fn pty_close(state: State<'_, AppState>, id: String) {
     state.ptys.lock().unwrap().remove(&id); // dropping the master hangs up the shell
+}
+
+/// Current working directory of a terminal's shell (so the panel can follow `cd`).
+fn shell_cwd(pid: u32) -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        let out = std::process::Command::new("lsof")
+            .args(["-a", "-d", "cwd", "-p", &pid.to_string(), "-Fn"])
+            .output()
+            .ok()?;
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .find_map(|l| l.strip_prefix('n').map(|p| p.to_string()))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        std::fs::read_link(format!("/proc/{pid}/cwd")).ok().map(|p| p.to_string_lossy().to_string())
+    }
+}
+
+#[tauri::command]
+fn pty_cwd(state: State<'_, AppState>, id: String) -> Option<String> {
+    let pid = state.ptys.lock().unwrap().get(&id).and_then(|p| p.child_pid)?;
+    shell_cwd(pid)
+}
+
+/// Re-scope the panel (prompts/notes/agents/skills/mcp) to a folder.
+#[tauri::command]
+fn set_project_dir(state: State<'_, AppState>, path: String) {
+    let p = std::path::PathBuf::from(&path);
+    if p.is_dir() {
+        state.set_dir(&p);
+    }
 }
 
 // ---- prompts (dual scope: project + global) ----
@@ -287,26 +337,22 @@ fn parse_mcp(v: &serde_json::Value, scope: &str, out: &mut Vec<McpItem>) {
 }
 
 #[tauri::command]
-fn mcp_list() -> Vec<McpItem> {
+fn mcp_list(state: State<'_, AppState>) -> Vec<McpItem> {
     let mut out = Vec::new();
-    let cwd = std::env::current_dir().ok();
+    let cwd = state.dir();
     if let Some(home) = dirs::home_dir() {
         if let Ok(txt) = std::fs::read_to_string(home.join(".claude.json")) {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&txt) {
                 parse_mcp(&v, "global", &mut out);
-                if let Some(cwd) = &cwd {
-                    if let Some(proj) = v.get("projects").and_then(|p| p.get(cwd.to_string_lossy().as_ref())) {
-                        parse_mcp(proj, "project", &mut out);
-                    }
+                if let Some(proj) = v.get("projects").and_then(|p| p.get(cwd.to_string_lossy().as_ref())) {
+                    parse_mcp(proj, "project", &mut out);
                 }
             }
         }
     }
-    if let Some(cwd) = &cwd {
-        if let Ok(txt) = std::fs::read_to_string(cwd.join(".mcp.json")) {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&txt) {
-                parse_mcp(&v, "project", &mut out);
-            }
+    if let Ok(txt) = std::fs::read_to_string(cwd.join(".mcp.json")) {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&txt) {
+            parse_mcp(&v, "project", &mut out);
         }
     }
     out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
@@ -415,6 +461,8 @@ fn main() {
             pty_write,
             pty_resize,
             pty_close,
+            pty_cwd,
+            set_project_dir,
             prompts_search,
             prompts_get,
             prompts_save,

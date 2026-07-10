@@ -574,3 +574,6 @@ body {
 .confirm-pop .confirm-title { font-size: 13px; }
 .confirm-pop .confirm-detail { font-size: 11.5px; margin-top: 4px; }
 .confirm-pop .confirm-actions { margin-top: 12px; }
+
+/* current-folder label in the top bar (panel follows this folder) */
+.cwd-label { flex: 0 0 auto; font-size: 11px; color: var(--text-dim); font-family: var(--font-mono); white-space: nowrap; max-width: 220px; overflow: hidden; text-overflow: ellipsis; padding: 0 6px; }
