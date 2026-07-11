@@ -1,7 +1,7 @@
 # DevCLI — Rust core (Tauri v2). Real PTY + shell + Claude Code prompt vault.
 [package]
 name = "devcli"
-version = "0.2.3"
+version = "0.2.4"
 edition = "2021"
 description = "Local-first terminal for Claude Code vibe coders"
 
