@@ -902,7 +902,7 @@ async function enhanceNote() {
   btn.disabled = true;
   status("enhancing via claude…", true);
   try {
-    ta.value = await invoke("rephrase_prompt", { draft: t, base: null, model: enhanceModel() });
+    ta.value = await invoke("rephrase_prompt", { draft: t, base: null, model: enhanceModel(), kind: "note" });
     autoGrow(ta);
     $("#note-refine-row").classList.remove("hidden"); // reveal refine to iterate
     status("enhanced ✓ — tweak with ↻ Refine");
@@ -917,7 +917,7 @@ async function refineNote() {
   btn.disabled = true;
   status("refining via claude…", true);
   try {
-    const out = await invoke("rephrase_prompt", { draft: instr, base, model: enhanceModel() });
+    const out = await invoke("rephrase_prompt", { draft: instr, base, model: enhanceModel(), kind: "note" });
     const ta = $("#note-text");
     ta.value = out;
     autoGrow(ta);

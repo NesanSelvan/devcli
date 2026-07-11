@@ -452,21 +452,37 @@ fn prompts_import(state: State<'_, AppState>, scope: String, src: String) -> Res
 
 // ---- rephrase (uses the user's local `claude` CLI in print mode; no API key) ----
 
-fn build_meta(draft: &str, base: Option<&str>) -> String {
+fn build_meta(draft: &str, base: Option<&str>, kind: &str) -> String {
+    let is_note = kind == "note";
     match base {
-        Some(b) if !b.trim().is_empty() => format!(
-            "You are a prompt editor. You are given an EXISTING PROMPT and an EDIT \
-             INSTRUCTION describing HOW to transform it (for example: \"make it shorter\", \
-             \"condense to 2 lines\", \"add error handling\", \"more formal\").\n\n\
-             Apply the edit instruction to rewrite the existing prompt. The edit instruction \
-             is a directive about how to change the prompt — it is NOT content to add. Do NOT \
-             copy the instruction's words into the output, do NOT append it, and do NOT treat \
-             phrases like \"2 lines\" as text to insert. If it asks for a length or format \
-             (e.g. 2 lines, one paragraph, bullet points), make the OUTPUT itself match that. \
-             Preserve the original intent.\n\n\
-             Return ONLY the rewritten prompt text — no preamble, no explanation, no quotes, \
-             no code fences.\n\n\
-             EXISTING PROMPT:\n{b}\n\nEDIT INSTRUCTION:\n{draft}"
+        Some(b) if !b.trim().is_empty() => {
+            let subject = if is_note { "note editor" } else { "prompt editor" };
+            let note_rule = if is_note {
+                " Keep the OUTPUT a short note/task — a line or two, never a paragraph, unless the \
+                 instruction explicitly asks for more detail."
+            } else {
+                ""
+            };
+            format!(
+                "You are a {subject}. You are given EXISTING TEXT and an EDIT INSTRUCTION describing \
+                 HOW to transform it (for example: \"make it shorter\", \"condense to 2 lines\", \
+                 \"add error handling\", \"more formal\").\n\n\
+                 Apply the edit instruction to rewrite the existing text. The edit instruction is a \
+                 directive about how to change it — it is NOT content to add. Do NOT copy the \
+                 instruction's words into the output, do NOT append it, and do NOT treat phrases like \
+                 \"2 lines\" as text to insert. If it asks for a length or format (e.g. 2 lines, one \
+                 paragraph, bullet points), make the OUTPUT itself match that.{note_rule} Preserve the \
+                 original intent.\n\n\
+                 Return ONLY the rewritten text — no preamble, no explanation, no quotes, no code \
+                 fences.\n\nEXISTING TEXT:\n{b}\n\nEDIT INSTRUCTION:\n{draft}"
+            )
+        }
+        _ if is_note => format!(
+            "You are refining a quick note or to-do for a task list. Rewrite the draft into a short, \
+             clear, actionable note — ideally ONE line, at most two. Use imperative phrasing, cut \
+             filler, keep any links or IDs intact. Do NOT expand it into a paragraph and do NOT add \
+             sections or headings unless the draft explicitly asks for detail. Return ONLY the note \
+             text — no preamble, no explanation, no quotes.\n\nDRAFT:\n{draft}"
         ),
         _ => format!(
             "You are a prompt engineer for a coding agent. Rewrite the draft into a clear, \
@@ -549,11 +565,12 @@ async fn rephrase_prompt(
     draft: String,
     base: Option<String>,
     model: Option<String>,
+    kind: Option<String>,
 ) -> Result<String, String> {
     if draft.trim().is_empty() {
         return Err("nothing to rephrase".into());
     }
-    let meta = build_meta(&draft, base.as_deref());
+    let meta = build_meta(&draft, base.as_deref(), kind.as_deref().unwrap_or("prompt"));
     tauri::async_runtime::spawn_blocking(move || run_claude(&meta, model.as_deref()))
         .await
         .map_err(|e| e.to_string())?

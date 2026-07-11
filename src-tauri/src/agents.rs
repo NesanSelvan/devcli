@@ -1,7 +1,7 @@
 // DevCLI — surface the user's Claude Code agents and skills in the side panel.
 // Reads markdown frontmatter (name/description) from the global (~/.claude) and
 // project (<cwd>/.claude) locations.
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 use walkdir::WalkDir;
@@ -120,14 +120,49 @@ fn read_skills(dir: &Path, scope: &str, out: &mut Vec<Item>) {
     }
 }
 
+// Collect every `.claude` dir under `root` (bounded depth), pruning heavy build/
+// dependency dirs — so a monorepo's sub-project skills/agents are picked up too.
+fn find_claude_dirs<P: AsRef<Path>>(root: P) -> Vec<PathBuf> {
+    const SKIP: &[&str] = &[
+        "node_modules", "target", "dist", "build", ".git", ".next", "vendor",
+        "venv", ".venv", "site-packages", "__pycache__", ".dart_tool", "Pods",
+        ".gradle", "coverage",
+    ];
+    let mut out = Vec::new();
+    let walker = WalkDir::new(root.as_ref())
+        .max_depth(5)
+        .into_iter()
+        .filter_entry(|e| {
+            !(e.file_type().is_dir()
+                && e.file_name().to_str().map_or(false, |n| SKIP.contains(&n)))
+        });
+    for entry in walker.filter_map(|e| e.ok()) {
+        if entry.file_type().is_dir() && entry.file_name() == ".claude" {
+            out.push(entry.path().to_path_buf());
+        }
+    }
+    out
+}
+
+// Drop later items whose name (case-insensitive) already appeared — keeps the
+// global / top-project copy over a sub-project duplicate (sort stably first).
+fn dedupe_by_name(items: &mut Vec<Item>) {
+    let mut seen = std::collections::HashSet::new();
+    items.retain(|it| seen.insert(it.name.to_lowercase()));
+}
+
 #[tauri::command]
 pub fn agents_list(state: tauri::State<'_, crate::AppState>) -> Vec<Item> {
     let mut out = Vec::new();
     if let Some(h) = dirs::home_dir() {
         read_agents(&h.join(".claude").join("agents"), "global", &mut out);
     }
-    read_agents(&state.dir().join(".claude").join("agents"), "project", &mut out);
+    // top project + any nested .claude dirs (monorepo sub-projects)
+    for cd in find_claude_dirs(state.dir()) {
+        read_agents(&cd.join("agents"), "project", &mut out);
+    }
     out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    dedupe_by_name(&mut out);
     out
 }
 
@@ -137,7 +172,10 @@ pub fn skills_list(state: tauri::State<'_, crate::AppState>) -> Vec<Item> {
     if let Some(h) = dirs::home_dir() {
         read_skills(&h.join(".claude").join("skills"), "global", &mut out);
     }
-    read_skills(&state.dir().join(".claude").join("skills"), "project", &mut out);
+    for cd in find_claude_dirs(state.dir()) {
+        read_skills(&cd.join("skills"), "project", &mut out);
+    }
     out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    dedupe_by_name(&mut out);
     out
 }
