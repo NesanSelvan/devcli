@@ -387,18 +387,18 @@ impl Vault {
         Ok(true)
     }
 
-    /// Index every prompt file in the folder that isn't already known. Returns count added.
+    /// Index every prompt file in the folder (and any subfolders) that isn't
+    /// already known. Returns count added.
     pub fn ingest_dir(&mut self) -> usize {
         let dir = self.root.join("prompts");
-        let entries = match std::fs::read_dir(&dir) {
-            Ok(e) => e,
-            Err(_) => return 0,
-        };
         let mut n = 0;
-        for e in entries.flatten() {
-            let p = e.path();
+        for entry in walkdir::WalkDir::new(&dir).into_iter().filter_map(|e| e.ok()) {
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let p = entry.path();
             if p.extension().and_then(|x| x.to_str()) == Some("md")
-                && self.ingest_file(&p).unwrap_or(false)
+                && self.ingest_file(p).unwrap_or(false)
             {
                 n += 1;
             }

@@ -306,11 +306,60 @@ fn read_doc(path: String) -> Result<String, String> {
     std::fs::read_to_string(&path).map_err(|e| e.to_string())
 }
 
+/// Read a text file for the side-panel preview. Relative paths resolve against
+/// the active project dir. Rejects oversized / binary files.
+#[tauri::command]
+fn read_file(state: State<'_, AppState>, path: String) -> Result<String, String> {
+    let pb = std::path::PathBuf::from(&path);
+    let full = if pb.is_absolute() { pb } else { state.dir().join(pb) };
+    let meta = std::fs::metadata(&full).map_err(|e| e.to_string())?;
+    if !meta.is_file() {
+        return Err("not a file".into());
+    }
+    if meta.len() > 1_048_576 {
+        return Err(format!("file too large to preview ({} KB)", meta.len() / 1024));
+    }
+    let bytes = std::fs::read(&full).map_err(|e| e.to_string())?;
+    if bytes.iter().take(8000).any(|&b| b == 0) {
+        return Err("binary file — can't preview".into());
+    }
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
 /// Open a URL in the user's default browser.
 #[tauri::command]
 fn open_external(url: String) -> Result<(), String> {
     let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
     std::process::Command::new(opener).arg(&url).spawn().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Reveal a file in Finder / the system file manager. Relative paths resolve
+/// against the active project dir (same rule as read_file).
+#[tauri::command]
+fn reveal_file(state: State<'_, AppState>, path: String) -> Result<(), String> {
+    let pb = std::path::PathBuf::from(&path);
+    let full = if pb.is_absolute() { pb } else { state.dir().join(pb) };
+    if !full.exists() {
+        return Err(format!("not found: {}", full.display()));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg("-R") // reveal + select in Finder
+            .arg(&full)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        // no portable "reveal"; open the containing folder
+        let dir = full.parent().unwrap_or(&full);
+        std::process::Command::new("xdg-open")
+            .arg(dir)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
     Ok(())
 }
 
@@ -364,9 +413,26 @@ fn mcp_list(state: State<'_, AppState>) -> Vec<McpItem> {
             }
         }
     }
-    if let Ok(txt) = std::fs::read_to_string(cwd.join(".mcp.json")) {
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&txt) {
-            parse_mcp(&v, "project", &mut out);
+    // any `.mcp.json` in the project dir or its subfolders (monorepo subprojects)
+    const SKIP: &[&str] = &["node_modules", "target", "dist", "build", ".git", ".next", "vendor"];
+    for entry in walkdir::WalkDir::new(&cwd)
+        .max_depth(5)
+        .into_iter()
+        .filter_entry(|e| {
+            if e.depth() == 0 {
+                return true;
+            }
+            let n = e.file_name().to_string_lossy();
+            !(e.file_type().is_dir() && SKIP.contains(&n.as_ref()))
+        })
+        .filter_map(|e| e.ok())
+    {
+        if entry.file_type().is_file() && entry.file_name() == ".mcp.json" {
+            if let Ok(txt) = std::fs::read_to_string(entry.path()) {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&txt) {
+                    parse_mcp(&v, "project", &mut out);
+                }
+            }
         }
     }
     out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
@@ -389,10 +455,18 @@ fn prompts_import(state: State<'_, AppState>, scope: String, src: String) -> Res
 fn build_meta(draft: &str, base: Option<&str>) -> String {
     match base {
         Some(b) if !b.trim().is_empty() => format!(
-            "You are a prompt engineer for a coding agent. Improve the EXISTING prompt by \
-             incorporating the requested change. Keep the original intent. Return ONLY the \
-             improved prompt text — no preamble, no explanation, no code fences.\n\n\
-             EXISTING PROMPT:\n{b}\n\nCHANGE TO APPLY:\n{draft}"
+            "You are a prompt editor. You are given an EXISTING PROMPT and an EDIT \
+             INSTRUCTION describing HOW to transform it (for example: \"make it shorter\", \
+             \"condense to 2 lines\", \"add error handling\", \"more formal\").\n\n\
+             Apply the edit instruction to rewrite the existing prompt. The edit instruction \
+             is a directive about how to change the prompt — it is NOT content to add. Do NOT \
+             copy the instruction's words into the output, do NOT append it, and do NOT treat \
+             phrases like \"2 lines\" as text to insert. If it asks for a length or format \
+             (e.g. 2 lines, one paragraph, bullet points), make the OUTPUT itself match that. \
+             Preserve the original intent.\n\n\
+             Return ONLY the rewritten prompt text — no preamble, no explanation, no quotes, \
+             no code fences.\n\n\
+             EXISTING PROMPT:\n{b}\n\nEDIT INSTRUCTION:\n{draft}"
         ),
         _ => format!(
             "You are a prompt engineer for a coding agent. Rewrite the draft into a clear, \
@@ -403,13 +477,29 @@ fn build_meta(draft: &str, base: Option<&str>) -> String {
     }
 }
 
+/// Keep only shell-safe chars so the model name can't inject into the `-lc` string.
+fn safe_model(model: Option<&str>) -> Option<String> {
+    let m: String = model?
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | ':'))
+        .collect();
+    if m.is_empty() { None } else { Some(m) }
+}
+
 /// Blocking claude call with a watchdog timeout. Runs off the UI thread.
-fn run_claude(meta: &str) -> Result<String, String> {
+/// `model` is a `claude` alias ("haiku" / "sonnet" / "opus") or a full model id;
+/// None uses the CLI's default. Enhance runs in plain print mode (no think keywords)
+/// so it stays low-latency — "low thinking" by construction.
+fn run_claude(meta: &str, model: Option<&str>) -> Result<String, String> {
     use std::time::{Duration, Instant};
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
+    let cmd = match safe_model(model) {
+        Some(m) => format!("claude -p --model {m}"),
+        None => "claude -p".to_string(),
+    };
     let mut child = std::process::Command::new(&shell)
         .arg("-lc")
-        .arg("claude -p")
+        .arg(&cmd)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -455,12 +545,16 @@ fn run_claude(meta: &str) -> Result<String, String> {
 /// Rephrase a draft (optionally updating an existing prompt) via `claude -p`.
 /// Async + off-thread so the UI never freezes while claude runs.
 #[tauri::command]
-async fn rephrase_prompt(draft: String, base: Option<String>) -> Result<String, String> {
+async fn rephrase_prompt(
+    draft: String,
+    base: Option<String>,
+    model: Option<String>,
+) -> Result<String, String> {
     if draft.trim().is_empty() {
         return Err("nothing to rephrase".into());
     }
     let meta = build_meta(&draft, base.as_deref());
-    tauri::async_runtime::spawn_blocking(move || run_claude(&meta))
+    tauri::async_runtime::spawn_blocking(move || run_claude(&meta, model.as_deref()))
         .await
         .map_err(|e| e.to_string())?
 }
@@ -496,6 +590,8 @@ fn main() {
             item_hide,
             item_meta_list,
             read_doc,
+            read_file,
+            reveal_file,
             open_external,
             mcp_list,
             prompts_export,

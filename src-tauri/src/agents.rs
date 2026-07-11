@@ -4,14 +4,25 @@
 use std::path::Path;
 
 use serde::Serialize;
+use walkdir::WalkDir;
 
 #[derive(Serialize)]
 pub struct Item {
     pub name: String,
     pub description: String,
     pub scope: String, // "global" | "project"
-    pub kind: String,  // "agent" | "skill"
+    pub kind: String,  // "agent" | "skill" | "task"
     pub path: String,
+    pub mtime: u64, // last-modified epoch secs
+}
+
+fn mtime_of(p: &Path) -> u64 {
+    std::fs::metadata(p)
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 fn truncate(s: &str, n: usize) -> String {
@@ -46,18 +57,27 @@ fn parse_frontmatter(raw: &str) -> (Option<String>, Option<String>) {
     (name, desc)
 }
 
+// Walk the agents dir (and any subfolders — plugins/namespaces) for `*.md`
+// agent definitions. Only files with YAML frontmatter count, so stray docs
+// (README, notes) are skipped.
 fn read_agents(dir: &Path, scope: &str, out: &mut Vec<Item>) {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
-    for e in entries.flatten() {
-        let p = e.path();
+    for entry in WalkDir::new(dir).max_depth(6).into_iter().filter_map(|e| e.ok()) {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let p = entry.path();
         if p.extension().and_then(|x| x.to_str()) != Some("md") {
             continue;
         }
-        let raw = std::fs::read_to_string(&p).unwrap_or_default();
+        let fname = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
+        if fname.eq_ignore_ascii_case("README.md") {
+            continue;
+        }
+        let raw = std::fs::read_to_string(p).unwrap_or_default();
         let (n, d) = parse_frontmatter(&raw);
+        if n.is_none() && d.is_none() {
+            continue; // no frontmatter → not an agent definition
+        }
         let name = n.unwrap_or_else(|| {
             p.file_stem().and_then(|s| s.to_str()).unwrap_or("agent").to_string()
         });
@@ -67,24 +87,27 @@ fn read_agents(dir: &Path, scope: &str, out: &mut Vec<Item>) {
             scope: scope.to_string(),
             kind: "agent".to_string(),
             path: p.to_string_lossy().to_string(),
+            mtime: mtime_of(p),
         });
     }
 }
 
+// Walk the skills dir (and subfolders) for any `SKILL.md` at any depth.
 fn read_skills(dir: &Path, scope: &str, out: &mut Vec<Item>) {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
-    for e in entries.flatten() {
-        let skill_md = e.path().join("SKILL.md");
-        if !skill_md.exists() {
+    for entry in WalkDir::new(dir).max_depth(8).into_iter().filter_map(|e| e.ok()) {
+        if !entry.file_type().is_file() || entry.file_name() != "SKILL.md" {
             continue;
         }
-        let raw = std::fs::read_to_string(&skill_md).unwrap_or_default();
+        let skill_md = entry.path();
+        let raw = std::fs::read_to_string(skill_md).unwrap_or_default();
         let (n, d) = parse_frontmatter(&raw);
         let name = n.unwrap_or_else(|| {
-            e.path().file_name().and_then(|s| s.to_str()).unwrap_or("skill").to_string()
+            skill_md
+                .parent()
+                .and_then(|d| d.file_name())
+                .and_then(|s| s.to_str())
+                .unwrap_or("skill")
+                .to_string()
         });
         out.push(Item {
             name,
@@ -92,6 +115,7 @@ fn read_skills(dir: &Path, scope: &str, out: &mut Vec<Item>) {
             scope: scope.to_string(),
             kind: "skill".to_string(),
             path: skill_md.to_string_lossy().to_string(),
+            mtime: mtime_of(skill_md),
         });
     }
 }

@@ -15,7 +15,23 @@
       </header>
 
       <div class="workspace">
-        <div class="terms" id="terms"></div>
+        <div class="terms" id="terms">
+          <div id="term-search" class="term-search hidden">
+            <input id="term-search-input" class="term-search-input" placeholder="Find in terminal…" spellcheck="false" />
+            <button id="term-search-prev" class="term-search-btn" title="Previous (⇧⏎)">↑</button>
+            <button id="term-search-next" class="term-search-btn" title="Next (⏎)">↓</button>
+            <button id="term-search-close" class="term-search-btn" title="Close (Esc)">✕</button>
+          </div>
+        </div>
+
+        <section id="file-panel" class="file-panel hidden">
+          <div class="file-panel-head">
+            <span id="file-panel-name" class="file-panel-name"></span>
+            <button id="file-panel-open" class="row-ico" title="Reveal in Finder">↗</button>
+            <button id="file-panel-close" class="row-ico" title="Close (Esc)">✕</button>
+          </div>
+          <pre id="file-panel-body" class="file-panel-body"></pre>
+        </section>
 
         <aside class="panel" id="panel">
           <div class="panel-tabs">
@@ -36,6 +52,11 @@
                   placeholder="Write a new prompt here… then ✨ Enhance, and Save."></textarea>
                 <div class="compose-actions">
                   <button id="compose-enhance" class="btn btn-sm accent-btn">✨ Enhance</button>
+                  <select id="enhance-model" class="mini-select" title="Model used by Enhance / Refine">
+                    <option value="haiku">⚡ Haiku · fast</option>
+                    <option value="sonnet">Sonnet · balanced</option>
+                    <option value="opus">Opus · best</option>
+                  </select>
                   <button id="compose-save-proj" class="btn btn-sm">Save · folder</button>
                   <button id="compose-save-glob" class="btn btn-sm">Save · global</button>
                   <button id="compose-insert" class="btn btn-sm">→ Terminal</button>
@@ -71,6 +92,11 @@
                 <textarea id="note-text" class="field note-input" placeholder="Add a note or task… paste links and they turn clickable. ⌘Enter to add."></textarea>
                 <div class="note-actions">
                   <button id="note-enhance" class="btn btn-sm accent-btn">✨ Enhance</button>
+                  <select id="enhance-model-note" class="mini-select" title="Model used by Enhance / Refine">
+                    <option value="haiku">⚡ Haiku · fast</option>
+                    <option value="sonnet">Sonnet · balanced</option>
+                    <option value="opus">Opus · best</option>
+                  </select>
                   <button id="note-add" class="btn btn-sm">Add note</button>
                   <button id="note-refine-toggle" class="btn btn-sm" title="Refine / change it">↻</button>
                 </div>

@@ -2,6 +2,8 @@
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebglAddon } from "@xterm/addon-webgl";
+import { SearchAddon } from "@xterm/addon-search";
+import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -67,13 +69,25 @@ const panes = new Map(); // id -> { id, term, fit, draft, el, name, pinned, colo
 let activeId = "1";
 const TAB_COLORS = ["#2DD4BF", "#58A6FF", "#3FB950", "#D29922", "#F85149", "#A970FF", "#EC6CB9"];
 
+let fontSize = Math.max(8, Math.min(28, parseInt(localStorage.getItem("devcli-fontsize") || "13", 10) || 13));
 function makeTerm() {
   return new Terminal({
     fontFamily: '"JetBrains Mono", ui-monospace, "SF Mono", monospace',
-    fontSize: 13, lineHeight: 1.5, cursorBlink: true, allowProposedApi: true,
+    fontSize, lineHeight: 1.5,
+    cursorBlink: true, cursorStyle: "bar", cursorInactiveStyle: "outline", cursorWidth: 2,
+    allowProposedApi: true,
+    smoothScrollDuration: 90, scrollSensitivity: 3,
     scrollback: 100000, // keep the whole session scrollable (default was 1000)
     theme: termTheme(),
   });
+}
+// live font zoom — ⌘+ / ⌘- / ⌘0. Applies to every pane, then refits.
+function setFontSize(n) {
+  fontSize = Math.max(8, Math.min(28, n));
+  localStorage.setItem("devcli-fontsize", String(fontSize));
+  for (const p of panes.values()) p.term.options.fontSize = fontSize;
+  refitAll();
+  status(`Font size ${fontSize}px`);
 }
 function trackDraft(pane, data) {
   for (const ch of data) {
@@ -140,6 +154,33 @@ function renameTab(pane, nameEl) {
   inp.addEventListener("blur", commit);
 }
 
+// match file paths / filenames in terminal output (e.g. dummy.txt, src/main.rs,
+// ./x.js:12). Requires a "." + 2–8 char extension so prose like "e.g" is ignored.
+const FILE_PATH_RE = /(?:\.{0,2}\/)?[\w@.+\-]+(?:\/[\w@.+\-]+)*\.[A-Za-z][A-Za-z0-9]{1,7}(?::\d+)?/g;
+function registerFilePathLinks(term) {
+  term.registerLinkProvider({
+    provideLinks(y, callback) {
+      const line = term.buffer.active.getLine(y - 1);
+      if (!line) { callback(undefined); return; }
+      const text = line.translateToString(true);
+      const links = [];
+      FILE_PATH_RE.lastIndex = 0;
+      let m;
+      while ((m = FILE_PATH_RE.exec(text)) !== null) {
+        const raw = m[0];
+        const before = text.slice(Math.max(0, m.index - 3), m.index);
+        if (before.includes("//")) continue;              // inside a URL (web-links owns those)
+        links.push({
+          range: { start: { x: m.index + 1, y }, end: { x: m.index + raw.length, y } },
+          text: raw,
+          activate: (_e, t) => { const p = t.replace(/:\d+$/, ""); previewFile(p, p); },
+        });
+      }
+      callback(links.length ? links : undefined);
+    },
+  });
+}
+
 function createPane(id) {
   const wrap = el("div", "term-pane");
   wrap.dataset.id = id;
@@ -147,7 +188,12 @@ function createPane(id) {
 
   const term = makeTerm();
   const fit = new FitAddon();
+  const search = new SearchAddon();
   term.loadAddon(fit);
+  term.loadAddon(search);
+  // URLs in the terminal become clickable — open in the default browser
+  term.loadAddon(new WebLinksAddon((_e, uri) => invoke("open_external", { url: uri })));
+  registerFilePathLinks(term); // file paths → preview in the side panel
   term.open(wrap);
   // GPU-accelerated rendering; fall back to canvas if WebGL is unavailable
   try {
@@ -157,8 +203,14 @@ function createPane(id) {
   } catch (_) { /* canvas fallback */ }
   fit.fit();
 
-  const pane = { id, term, fit, draft: "", el: wrap, name: `Terminal ${id}`, pinned: false, color: null };
+  const pane = { id, term, fit, search, draft: "", el: wrap, name: `Terminal ${id}`, pinned: false, color: null };
   panes.set(id, pane);
+
+  // copy-on-select — highlighting text puts it on the clipboard (iTerm/Warp behaviour)
+  term.onSelectionChange(() => {
+    const sel = term.getSelection();
+    if (sel && sel.length) navigator.clipboard?.writeText(sel).catch(() => {});
+  });
 
   term.onData((data) => {
     invoke("pty_write", { id, data });
@@ -177,6 +229,45 @@ function refitAll() {
   if (!p) return;
   try { p.fit.fit(); } catch (_) {}
   invoke("pty_resize", { id: p.id, rows: p.term.rows, cols: p.term.cols });
+}
+
+// ── in-terminal search (⌘F) ─────────────────────────────────────────
+const SEARCH_DECOR = {
+  matchBackground: "#2DD4BF44", matchBorder: "#2DD4BF",
+  activeMatchBackground: "#58A6FF", activeMatchColorOverviewRuler: "#58A6FF",
+  matchOverviewRuler: "#2DD4BF",
+};
+function openSearch() {
+  const bar = $("#term-search");
+  bar.classList.remove("hidden");
+  const inp = $("#term-search-input");
+  inp.focus(); inp.select();
+  if (inp.value) runSearch(1);
+}
+function closeSearch() {
+  $("#term-search").classList.add("hidden");
+  try { panes.get(activeId)?.search?.clearDecorations(); } catch (_) {}
+  panes.get(activeId)?.term.focus();
+}
+function runSearch(dir) {
+  const q = $("#term-search-input").value;
+  const s = panes.get(activeId)?.search;
+  if (!s) return;
+  if (!q) { try { s.clearDecorations(); } catch (_) {} return; }
+  const opts = { decorations: SEARCH_DECOR, regex: false, caseSensitive: false };
+  if (dir < 0) s.findPrevious(q, opts); else s.findNext(q, opts);
+}
+function wireSearch() {
+  const inp = $("#term-search-input");
+  if (!inp) return;
+  inp.addEventListener("input", () => runSearch(1));
+  inp.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); runSearch(e.shiftKey ? -1 : 1); }
+    else if (e.key === "Escape") { e.preventDefault(); closeSearch(); }
+  });
+  $("#term-search-next").addEventListener("click", () => runSearch(1));
+  $("#term-search-prev").addEventListener("click", () => runSearch(-1));
+  $("#term-search-close").addEventListener("click", closeSearch);
 }
 
 const nextFreeId = () => {
@@ -226,6 +317,24 @@ function setBase(text, title) {
   }
 }
 
+// model used by every Enhance / Refine call — user-picked, persisted
+function enhanceModel() {
+  return localStorage.getItem("devcli-enhance-model") || "haiku";
+}
+// keep the Prompts + Notes model dropdowns in sync and persisted
+function wireEnhanceModel() {
+  const sels = [$("#enhance-model"), $("#enhance-model-note")].filter(Boolean);
+  const cur = enhanceModel();
+  for (const s of sels) {
+    s.value = cur;
+    s.addEventListener("change", () => {
+      localStorage.setItem("devcli-enhance-model", s.value);
+      for (const o of sels) o.value = s.value;
+      status(`Enhance model: ${s.options[s.selectedIndex].text.replace(/^[⚡ ]+/, "")}`);
+    });
+  }
+}
+
 async function enhanceActive() {
   const pane = panes.get(activeId);
   if (!pane) return;
@@ -235,7 +344,7 @@ async function enhanceActive() {
   const context = draft || "Incorporate the current project context.";
   status(base ? "merging base + context via claude…" : "enhancing via claude…", true);
   try {
-    const improved = await invoke("rephrase_prompt", { draft: context, base });
+    const improved = await invoke("rephrase_prompt", { draft: context, base, model: enhanceModel() });
     const oneLine = improved.replace(/\s*\n\s*/g, " ").trim();
     invoke("pty_write", { id: activeId, data: "\x7f".repeat(pane.draft.length) }); // erase what was typed
     invoke("pty_write", { id: activeId, data: oneLine });                          // type the enhanced prompt
@@ -297,48 +406,42 @@ function openTabMenu(x, y, id) {
   menu.style.top = Math.min(y, window.innerHeight - mh - 8) + "px";
 }
 
-// ---------- session blocks ----------
-function blockShell(kind, label, ts) {
-  const b = el("div", `block block--${kind}`);
-  const head = el("div", "block__head");
-  head.appendChild(el("span", "block__label", label));
+// ---------- live Claude activity: collapsible cards (min/max per block) ----------
+// each card starts minimized (header + 1-line preview); click the caret/header to maximize.
+function activityCard(kind, label, ts, fullText, mono, openDefault) {
+  const b = el("div", `block block--${kind} act-card`);
+  const head = el("div", "block__head act-head");
+  const caret = el("button", "act-caret", openDefault ? "▾" : "▸");
+  const preview = el("span", "act-preview", (fullText || "").replace(/\s+/g, " ").trim().slice(0, 52));
+  head.append(caret, el("span", "block__label", label), preview);
   if (ts) head.appendChild(el("span", "block__time", hhmm(ts)));
   b.appendChild(head);
-  return b;
-}
-// collapsible card: shows a preview, tap to expand full text
-function makeExpandable(b, fullText, mono) {
-  const long = fullText.length > 180;
-  const preview = long ? fullText.slice(0, 180) + "…" : fullText;
-  const body = el("div", "block__body" + (mono ? " block__mono" : ""), preview);
+  const body = el("div", "act-body" + (mono ? " block__mono" : ""));
+  body.textContent = fullText;
+  let open = !!openDefault;
+  const apply = () => {
+    body.style.display = open ? "" : "none";
+    preview.style.display = open ? "none" : "";
+    caret.textContent = open ? "▾" : "▸";
+  };
+  apply();
+  head.addEventListener("click", () => { open = !open; apply(); });
   b.appendChild(body);
-  if (long) {
-    b.classList.add("block--tap");
-    let open = false;
-    b.addEventListener("click", () => {
-      open = !open;
-      body.textContent = open ? fullText : preview;
-      b.classList.toggle("open", open);
-    });
-  }
   return b;
 }
 function renderEvent(ev) {
   switch (ev.kind) {
-    case "UserPrompt":
-      return makeExpandable(blockShell("prompt", "you", ev.ts), ev.text, true);
-    case "Thinking":
-      return makeExpandable(blockShell("thinking", "💭 thinking", ev.ts), ev.text, false);
-    case "Assistant":
-      return makeExpandable(blockShell("assistant", "claude", ev.ts), ev.text, false);
-    case "ToolUse":
-      return makeExpandable(blockShell("tool", `⚙ ${ev.tool}`, ev.ts), ev.summary || "(no input)", true);
-    case "ToolResult":
-      return makeExpandable(
-        blockShell(ev.is_error ? "error" : "result", ev.is_error ? "✕ result" : "✓ result", ev.ts),
-        ev.summary || "(empty)", true);
+    case "UserPrompt": return activityCard("prompt", "you", ev.ts, ev.text, true, true);
+    case "Thinking":   return activityCard("thinking", "💭 thinking", ev.ts, ev.text, false, false);
+    case "Assistant":  return activityCard("assistant", "claude", ev.ts, ev.text, false, false);
+    case "ToolUse":    return activityCard("tool", `⚙ ${ev.tool}`, ev.ts, ev.summary || "(no input)", true, false);
+    case "ToolResult": return activityCard(ev.is_error ? "error" : "result", ev.is_error ? "✕ result" : "✓ result", ev.ts, ev.summary || "(empty)", true, false);
     case "Todo": {
-      const b = blockShell("todo", "todos", ev.ts);
+      const b = el("div", "block block--todo act-card");
+      const head = el("div", "block__head");
+      head.appendChild(el("span", "block__label", "todos"));
+      if (ev.ts) head.appendChild(el("span", "block__time", hhmm(ev.ts)));
+      b.appendChild(head);
       const list = el("div", "todo-list");
       for (const item of ev.items) {
         const done = item.status === "completed";
@@ -444,6 +547,7 @@ async function enhanceCompose() {
     const improved = await invoke("rephrase_prompt", {
       draft: draft || "Improve clarity, specificity and structure.",
       base,
+      model: enhanceModel(),
     });
     ta.value = improved;
     autoGrow(ta);
@@ -466,7 +570,7 @@ async function refineCompose() {
   btn.disabled = true;
   status("refining via claude…", true);
   try {
-    const out = await invoke("rephrase_prompt", { draft: instr, base });
+    const out = await invoke("rephrase_prompt", { draft: instr, base, model: enhanceModel() });
     const ta = $("#compose-input");
     ta.value = out;
     autoGrow(ta);
@@ -740,6 +844,34 @@ async function refreshMcp() {
   }
 }
 
+// ---------- file panel (click a terminal path → open a dedicated file panel) ----------
+// Opens the standalone file panel showing one file. Relative paths resolve
+// against the project dir (rust side). Triggered by clicking a path in the terminal.
+async function previewFile(path, display) {
+  let content;
+  try {
+    content = await invoke("read_file", { path });
+  } catch (e) {
+    status("⚠ " + e); // not a real file / unreadable — don't open an empty panel
+    return;
+  }
+  const panel = $("#file-panel");
+  $("#file-panel-name").textContent = display || path;
+  panel.dataset.path = path;
+  $("#file-panel-body").textContent = content || "(empty)";
+  panel.classList.remove("hidden"); // overlays the side panel; terminal keeps its width
+}
+function closeFilePanel() {
+  $("#file-panel").classList.add("hidden");
+}
+function wireFilePanel() {
+  $("#file-panel-close")?.addEventListener("click", closeFilePanel);
+  $("#file-panel-open")?.addEventListener("click", () => {
+    const p = $("#file-panel").dataset.path;
+    if (p) invoke("reveal_file", { path: p }).catch((e) => status("⚠ " + e));
+  });
+}
+
 // ---------- notes (pin / minimize / drag-reorder / enhance / links) ----------
 let currentNotes = [];
 function wireNotes() {
@@ -770,7 +902,7 @@ async function enhanceNote() {
   btn.disabled = true;
   status("enhancing via claude…", true);
   try {
-    ta.value = await invoke("rephrase_prompt", { draft: t, base: null });
+    ta.value = await invoke("rephrase_prompt", { draft: t, base: null, model: enhanceModel() });
     autoGrow(ta);
     $("#note-refine-row").classList.remove("hidden"); // reveal refine to iterate
     status("enhanced ✓ — tweak with ↻ Refine");
@@ -785,7 +917,7 @@ async function refineNote() {
   btn.disabled = true;
   status("refining via claude…", true);
   try {
-    const out = await invoke("rephrase_prompt", { draft: instr, base });
+    const out = await invoke("rephrase_prompt", { draft: instr, base, model: enhanceModel() });
     const ta = $("#note-text");
     ta.value = out;
     autoGrow(ta);
@@ -880,20 +1012,25 @@ function setPanel(open) {
   $("#panel-reopen").classList.toggle("hidden", open);
   setTimeout(refitAll, 0);
 }
+const PANEL_PANES = ["prompts", "agents", "skills", "mcp", "notes"];
+function loadPane(which) {
+  if (which === "prompts") refreshPrompts($("#prompts-search").value);
+  else if (which === "agents") refreshAgents();
+  else if (which === "skills") refreshSkills();
+  else if (which === "mcp") refreshMcp();
+  else if (which === "notes") refreshNotes();
+  // "files" has no list to load — it only shows a preview when a terminal path is clicked
+}
+// switch the side panel to a tab (and open the panel if collapsed)
+function activatePanelTab(which) {
+  document.querySelectorAll(".panel-tabs .tab").forEach((x) => x.classList.toggle("active", x.dataset.tab === which));
+  for (const p of PANEL_PANES) $("#pane-" + p).classList.toggle("hidden", p !== which);
+  if ($("#panel").classList.contains("hidden")) setPanel(true);
+  loadPane(which);
+}
 function wireTabs() {
-  document.querySelectorAll(".tab").forEach((t) => {
-    t.addEventListener("click", () => {
-      document.querySelectorAll(".tab").forEach((x) => x.classList.remove("active"));
-      t.classList.add("active");
-      const which = t.dataset.tab;
-      for (const p of ["prompts", "agents", "skills", "mcp", "notes"])
-        $("#pane-" + p).classList.toggle("hidden", p !== which);
-      if (which === "prompts") refreshPrompts($("#prompts-search").value);
-      if (which === "agents") refreshAgents();
-      if (which === "skills") refreshSkills();
-      if (which === "mcp") refreshMcp();
-      if (which === "notes") refreshNotes();
-    });
+  document.querySelectorAll(".panel-tabs .tab").forEach((t) => {
+    t.addEventListener("click", () => activatePanelTab(t.dataset.tab));
   });
 }
 
@@ -914,11 +1051,7 @@ async function checkForUpdates() {
 let currentDir = null;
 function refreshActivePanel() {
   const which = document.querySelector(".panel-tabs .tab.active")?.dataset.tab;
-  if (which === "prompts") refreshPrompts($("#prompts-search").value);
-  else if (which === "agents") refreshAgents();
-  else if (which === "skills") refreshSkills();
-  else if (which === "mcp") refreshMcp();
-  else if (which === "notes") refreshNotes();
+  if (which) loadPane(which);
 }
 async function syncProjectDir() {
   const cwd = await invoke("pty_cwd", { id: activeId }).catch(() => null);
@@ -982,7 +1115,11 @@ async function init() {
   window.addEventListener("resize", () => { closeMenu(); refitAll(); });
 
   window.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") { closeMenu(); hidePeek(true); return; }
+    if (e.key === "Escape") {
+      if (!$("#term-search").classList.contains("hidden")) { closeSearch(); return; }
+      if (!$("#file-panel").classList.contains("hidden")) { closeFilePanel(); return; }
+      closeMenu(); hidePeek(true); return;
+    }
     const mod = e.metaKey || e.ctrlKey;
     if (!mod) return;
     const k = e.key.toLowerCase();
@@ -990,12 +1127,19 @@ async function init() {
     else if (k === "e") { e.preventDefault(); enhanceActive(); }
     else if (k === "b") { e.preventDefault(); setPanel($("#panel").classList.contains("hidden")); }
     else if (k === "w") { e.preventDefault(); closeTab(activeId); }
+    else if (k === "f") { e.preventDefault(); openSearch(); }
+    else if (k === "=" || k === "+") { e.preventDefault(); setFontSize(fontSize + 1); }
+    else if (k === "-" || k === "_") { e.preventDefault(); setFontSize(fontSize - 1); }
+    else if (k === "0") { e.preventDefault(); setFontSize(13); }
     else if (/^[1-9]$/.test(k)) { // ⌘1..9 switch to that tab
       const list = orderedPanes();
       const idx = parseInt(k, 10) - 1;
       if (list[idx]) { e.preventDefault(); activeId = list[idx].id; showActive(); }
     }
   });
+  wireSearch();
+  wireEnhanceModel();
+  wireFilePanel();
 
   panes.get("1").term.focus();
   setTimeout(syncProjectDir, 800);      // initial folder detect

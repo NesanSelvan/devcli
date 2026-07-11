@@ -375,9 +375,9 @@ fn prompt_watch_loop(app: AppHandle) {
         Ok(w) => w,
         Err(_) => return,
     };
-    let _ = watcher.watch(&proj, RecursiveMode::NonRecursive);
+    let _ = watcher.watch(&proj, RecursiveMode::Recursive);
     if let Some(g) = &glob {
-        let _ = watcher.watch(g, RecursiveMode::NonRecursive);
+        let _ = watcher.watch(g, RecursiveMode::Recursive);
     }
 
     for res in rx {
