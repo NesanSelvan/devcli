@@ -46,6 +46,7 @@ pub struct Vault {
 pub struct Note {
     pub id: i64,
     pub kind: String,
+    pub title: String,
     pub text: String,
     pub url: String,
     pub done: bool,
@@ -107,6 +108,38 @@ fn title_of(text: &str) -> String {
     let line = text.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim();
     let t = truncate(line, 70);
     if t.is_empty() { "untitled prompt".into() } else { t }
+}
+
+/// Replace a `key: value` line inside the leading `---` frontmatter block
+/// (inserts it just after the opening `---` if the key is absent).
+fn set_frontmatter_field(raw: &str, key: &str, value: &str) -> String {
+    let lines: Vec<&str> = raw.lines().collect();
+    if lines.first() != Some(&"---") {
+        return raw.to_string();
+    }
+    let end = match lines.iter().enumerate().skip(1).find(|(_, l)| **l == "---") {
+        Some((i, _)) => i,
+        None => return raw.to_string(),
+    };
+    let prefix = format!("{key}:");
+    let mut out: Vec<String> = Vec::with_capacity(lines.len() + 1);
+    let mut replaced = false;
+    for (i, l) in lines.iter().enumerate() {
+        if i > 0 && i < end && l.trim_start().starts_with(&prefix) {
+            out.push(format!("{key}: {value}"));
+            replaced = true;
+        } else {
+            out.push((*l).to_string());
+        }
+    }
+    if !replaced {
+        out.insert(1, format!("{key}: {value}"));
+    }
+    let mut s = out.join("\n");
+    if raw.ends_with('\n') {
+        s.push('\n');
+    }
+    s
 }
 
 fn slugify(title: &str, hash: &str) -> String {
@@ -228,7 +261,7 @@ impl Vault {
         ] {
             let _ = conn.execute(&format!("ALTER TABLE prompts ADD COLUMN {col}"), []);
         }
-        for col in ["pinned INTEGER DEFAULT 0", "collapsed INTEGER DEFAULT 0", "sort INTEGER DEFAULT 0"] {
+        for col in ["pinned INTEGER DEFAULT 0", "collapsed INTEGER DEFAULT 0", "sort INTEGER DEFAULT 0", "title TEXT"] {
             let _ = conn.execute(&format!("ALTER TABLE notes ADD COLUMN {col}"), []);
         }
         Ok(Vault { root, base: base.to_path_buf(), scope: scope.to_string(), conn })
@@ -341,6 +374,35 @@ impl Vault {
             &self.root,
             &["-c", "user.name=DevCLI", "-c", "user.email=devcli@local", "commit", "-q", "-m", "remove prompt"],
         );
+        Ok(())
+    }
+
+    /// Rename a prompt's title: update the DB and rewrite the .md frontmatter
+    /// (keeps the slug / file path so links and git history stay intact).
+    pub fn set_title(&self, slug: &str, title: &str) -> Result<(), String> {
+        let title = title.trim();
+        if title.is_empty() {
+            return Err("empty title".into());
+        }
+        self.conn
+            .execute(
+                "UPDATE prompts SET title=?2, updated_at=?3 WHERE slug=?1",
+                rusqlite::params![slug, title, now_secs()],
+            )
+            .map_err(|e| e.to_string())?;
+        let file = self.root.join("prompts").join(format!("{slug}.md"));
+        if let Ok(raw) = std::fs::read_to_string(&file) {
+            let updated = set_frontmatter_field(&raw, "title", title);
+            if std::fs::write(&file, updated).is_ok() {
+                let rel = format!("prompts/{slug}.md");
+                let _ = run_git(&self.root, &["add", &rel]);
+                let _ = run_git(
+                    &self.root,
+                    &["-c", "user.name=DevCLI", "-c", "user.email=devcli@local",
+                      "commit", "-q", "-m", &format!("rename: {}", truncate(title, 50))],
+                );
+            }
+        }
         Ok(())
     }
 
@@ -486,7 +548,7 @@ impl Vault {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT id,COALESCE(kind,'note'),COALESCE(text,''),COALESCE(url,''),
+                "SELECT id,COALESCE(kind,'note'),COALESCE(title,''),COALESCE(text,''),COALESCE(url,''),
                         COALESCE(done,0),COALESCE(pinned,0),COALESCE(collapsed,0),COALESCE(created_at,0)
                  FROM notes ORDER BY pinned DESC, done ASC, sort ASC, created_at DESC",
             )
@@ -496,12 +558,13 @@ impl Vault {
                 Ok(Note {
                     id: r.get(0)?,
                     kind: r.get(1)?,
-                    text: r.get(2)?,
-                    url: r.get(3)?,
-                    done: r.get::<_, i64>(4)? != 0,
-                    pinned: r.get::<_, i64>(5)? != 0,
-                    collapsed: r.get::<_, i64>(6)? != 0,
-                    created_at: r.get(7)?,
+                    title: r.get(2)?,
+                    text: r.get(3)?,
+                    url: r.get(4)?,
+                    done: r.get::<_, i64>(5)? != 0,
+                    pinned: r.get::<_, i64>(6)? != 0,
+                    collapsed: r.get::<_, i64>(7)? != 0,
+                    created_at: r.get(8)?,
                 })
             })
             .map_err(|e| e.to_string())?;
@@ -538,6 +601,13 @@ impl Vault {
 
     pub fn note_delete(&self, id: i64) -> Result<(), String> {
         self.conn.execute("DELETE FROM notes WHERE id=?1", [id]).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn note_set_title(&self, id: i64, title: &str) -> Result<(), String> {
+        self.conn
+            .execute("UPDATE notes SET title=?2 WHERE id=?1", rusqlite::params![id, title.trim()])
+            .map_err(|e| e.to_string())?;
         Ok(())
     }
 

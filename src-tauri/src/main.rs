@@ -231,6 +231,11 @@ fn prompts_delete(state: State<'_, AppState>, scope: String, slug: String) -> Re
     state.vault_for(&scope).lock().unwrap().delete(&slug)
 }
 
+#[tauri::command]
+fn prompts_set_title(state: State<'_, AppState>, scope: String, slug: String, title: String) -> Result<(), String> {
+    state.vault_for(&scope).lock().unwrap().set_title(&slug, &title)
+}
+
 // ---- notes / tasks / links (project scope) ----
 
 #[tauri::command]
@@ -266,6 +271,11 @@ fn notes_collapse(state: State<'_, AppState>, id: i64) -> Result<(), String> {
 #[tauri::command]
 fn notes_reorder(state: State<'_, AppState>, ids: Vec<i64>) -> Result<(), String> {
     state.project.lock().unwrap().note_reorder(ids)
+}
+
+#[tauri::command]
+fn notes_set_title(state: State<'_, AppState>, id: i64, title: String) -> Result<(), String> {
+    state.project.lock().unwrap().note_set_title(id, &title)
 }
 
 // ---- groups + hide (prompts / agents / skills) ----
@@ -593,6 +603,7 @@ fn main() {
             prompts_save,
             prompts_tag,
             prompts_delete,
+            prompts_set_title,
             notes_add,
             notes_list,
             notes_toggle,
@@ -600,6 +611,7 @@ fn main() {
             notes_pin,
             notes_collapse,
             notes_reorder,
+            notes_set_title,
             groups_add,
             groups_list,
             groups_delete,

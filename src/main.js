@@ -63,11 +63,43 @@ function setTheme(name) {
   for (const p of panes.values()) p.term.options.theme = termTheme();
 }
 
-// ---------- terminals as tabs (one full terminal per tab) ----------
+// ---------- terminals: tabs of split-panes ----------
+// A tab holds a binary layout tree of leaf terminals (split right / down,
+// recursively). `panes` = every leaf terminal; `tabs` = the groups shown in
+// the top bar. `activeId` stays the *focused leaf* so search / insert / cwd
+// keep working on the pane you're actually typing in.
 const MAX_TABS = 24;
-const panes = new Map(); // id -> { id, term, fit, draft, el, name, pinned, color }
-let activeId = "1";
+const panes = new Map(); // paneId -> { id, term, fit, search, draft, el, tabId }
+const tabs = new Map();  // tabId  -> { id, name, pinned, color, el, root, activeLeaf }
+let activeId = "1";      // focused leaf paneId
+let activeTab = "t1";
+let paneSeq = 0, tabSeq = 0;
+const nextPaneId = () => String(++paneSeq);
+const nextTabId = () => "t" + (++tabSeq);
 const TAB_COLORS = ["#2DD4BF", "#58A6FF", "#3FB950", "#D29922", "#F85149", "#A970FF", "#EC6CB9"];
+
+// ── layout tree helpers ──────────────────────────────────────────────
+// node is either a leaf { paneId } or a split { dir:'row'|'col', a, b, sizeA }
+const isLeaf = (n) => n && n.paneId != null;
+const leafIds = (n) => (isLeaf(n) ? [n.paneId] : [...leafIds(n.a), ...leafIds(n.b)]);
+const tabLeafIds = (tab) => (tab?.root ? leafIds(tab.root) : []);
+// replace the leaf carrying paneId with `repl` (used by split)
+function replaceLeaf(node, paneId, repl) {
+  if (isLeaf(node)) return node.paneId === paneId ? repl : node;
+  node.a = replaceLeaf(node.a, paneId, repl);
+  node.b = replaceLeaf(node.b, paneId, repl);
+  return node;
+}
+// drop the leaf carrying paneId; a split with one survivor collapses to it
+function removeLeaf(node, paneId) {
+  if (isLeaf(node)) return node.paneId === paneId ? null : node;
+  const a = removeLeaf(node.a, paneId);
+  const b = removeLeaf(node.b, paneId);
+  if (!a) return b;
+  if (!b) return a;
+  node.a = a; node.b = b;
+  return node;
+}
 
 let fontSize = Math.max(8, Math.min(28, parseInt(localStorage.getItem("devcli-fontsize") || "13", 10) || 13));
 function makeTerm() {
@@ -76,7 +108,7 @@ function makeTerm() {
     fontSize, lineHeight: 1.5,
     cursorBlink: true, cursorStyle: "bar", cursorInactiveStyle: "outline", cursorWidth: 2,
     allowProposedApi: true,
-    smoothScrollDuration: 90, scrollSensitivity: 3,
+    smoothScrollDuration: 0, scrollSensitivity: 3, // snap to whole rows — sub-pixel smooth scroll jags box-drawing lines (│) in tables
     scrollback: 100000, // keep the whole session scrollable (default was 1000)
     theme: termTheme(),
   });
@@ -100,22 +132,41 @@ function trackDraft(pane, data) {
   }
 }
 // pinned tabs first, then insertion order
-function orderedPanes() {
-  return [...panes.values()].sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0));
+function orderedTabs() {
+  return [...tabs.values()].sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0));
 }
-// show only the active tab's terminal; hide the rest.
-// only toggles the .active class on existing tabs (no rebuild) so a
-// double-click on the tab name survives to trigger rename.
+// show only the active tab's split-tree; hide the rest, then fit its leaves.
 function showActive() {
-  for (const [id, p] of panes) p.el.style.display = id === activeId ? "" : "none";
-  const p = panes.get(activeId);
-  if (p) {
+  for (const [id, t] of tabs) t.el.style.display = id === activeTab ? "" : "none";
+  const tab = tabs.get(activeTab);
+  if (tab) {
+    // keep the focused leaf valid after closes / tab switches
+    const leaves = tabLeafIds(tab);
+    if (!leaves.includes(activeId)) tab.activeLeaf = leaves[0];
+    activeId = tab.activeLeaf;
+    fitTab(tab);
+    markActiveLeaf();
+    panes.get(activeId)?.term.focus();
+  }
+  document.querySelectorAll(".term-tab").forEach((t) => t.classList.toggle("active", t.dataset.id === activeTab));
+  if (typeof syncProjectDir === "function") syncProjectDir(); // instant folder sync on tab switch
+}
+// fit + resize every leaf terminal of a tab (call after layout / resize)
+function fitTab(tab) {
+  for (const id of tabLeafIds(tab)) {
+    const p = panes.get(id);
+    if (!p) continue;
     try { p.fit.fit(); } catch (_) {}
     invoke("pty_resize", { id: p.id, rows: p.term.rows, cols: p.term.cols });
-    p.term.focus();
   }
-  document.querySelectorAll(".term-tab").forEach((t) => t.classList.toggle("active", t.dataset.id === activeId));
-  if (typeof syncProjectDir === "function") syncProjectDir(); // instant folder sync on tab switch
+}
+// outline the focused leaf when a tab is split into more than one pane
+function markActiveLeaf() {
+  const multi = tabLeafIds(tabs.get(activeTab)).length > 1;
+  for (const [id, p] of panes) {
+    p.el.classList.toggle("multi", multi && p.tabId === activeTab);
+    p.el.classList.toggle("active", multi && id === activeId);
+  }
 }
 
 // top bar: one tab per terminal — rename, pin, color, close
@@ -123,19 +174,20 @@ function renderTermTabs() {
   const bar = $("#term-tabs");
   if (!bar) return;
   bar.innerHTML = "";
-  for (const p of orderedPanes()) {
-    const tab = el("div", "term-tab" + (p.id === activeId ? " active" : "") + (p.pinned ? " pinned" : ""));
+  for (const p of orderedTabs()) {
+    const nLeaves = tabLeafIds(p).length;
+    const tab = el("div", "term-tab" + (p.id === activeTab ? " active" : "") + (p.pinned ? " pinned" : ""));
     tab.dataset.id = p.id;
     if (p.color) { tab.style.setProperty("--tab-color", p.color); tab.classList.add("colored"); }
     if (p.pinned) { const pin = el("span", "term-tab-pin", "●"); if (p.color) pin.style.color = p.color; tab.appendChild(pin); }
     else if (p.color) { const dot = el("span", "term-tab-dot"); dot.style.background = p.color; tab.appendChild(dot); }
-    const name = el("span", "term-tab-name", p.name);
+    const name = el("span", "term-tab-name", p.name + (nLeaves > 1 ? ` ⊞${nLeaves}` : ""));
     name.addEventListener("dblclick", (e) => { e.stopPropagation(); renameTab(p, name); });
     tab.appendChild(name);
     const x = el("button", "term-tab-close", "✕");
     x.addEventListener("click", (e) => { e.stopPropagation(); closeTab(p.id); });
     tab.appendChild(x);
-    tab.addEventListener("click", () => { activeId = p.id; showActive(); });
+    tab.addEventListener("click", () => { activeTab = p.id; showActive(); });
     tab.addEventListener("contextmenu", (e) => { e.preventDefault(); openTabMenu(e.clientX, e.clientY, p.id); });
     bar.appendChild(tab);
   }
@@ -181,10 +233,12 @@ function registerFilePathLinks(term) {
   });
 }
 
-function createPane(id) {
+// one leaf terminal (xterm + PTY) living inside a tab's split-tree
+function createLeafPane(tabId) {
+  const id = nextPaneId();
   const wrap = el("div", "term-pane");
   wrap.dataset.id = id;
-  $("#terms").appendChild(wrap);
+  tabs.get(tabId).el.appendChild(wrap); // mount in DOM so xterm can size itself
 
   const term = makeTerm();
   const fit = new FitAddon();
@@ -203,7 +257,7 @@ function createPane(id) {
   } catch (_) { /* canvas fallback */ }
   fit.fit();
 
-  const pane = { id, term, fit, search, draft: "", el: wrap, name: `Terminal ${id}`, pinned: false, color: null };
+  const pane = { id, term, fit, search, draft: "", el: wrap, tabId };
   panes.set(id, pane);
 
   // copy-on-select — highlighting text puts it on the clipboard (iTerm/Warp behaviour)
@@ -216,19 +270,210 @@ function createPane(id) {
     invoke("pty_write", { id, data });
     trackDraft(pane, data);
   });
-  const focusThis = () => { activeId = id; showActive(); };
+  const focusThis = () => {
+    if (activeTab !== pane.tabId) { activeTab = pane.tabId; showActive(); return; }
+    activeId = id;
+    tabs.get(pane.tabId).activeLeaf = id;
+    markActiveLeaf();
+    if (typeof syncProjectDir === "function") syncProjectDir();
+  };
   wrap.addEventListener("mousedown", focusThis);
   if (term.textarea) term.textarea.addEventListener("focus", focusThis);
+  wrap.addEventListener("contextmenu", (e) => { e.preventDefault(); e.stopPropagation(); openPaneMenu(e.clientX, e.clientY, id); });
+
+  // drag grip (shown when a tab is split) — pointer-drag it onto another pane to swap positions.
+  // pointer events (not HTML5 DnD) so it works reliably over the xterm canvas.
+  const grip = el("div", "pane-grip", "⠿ drag");
+  grip.title = "drag onto another pane to swap positions";
+  grip.addEventListener("mousedown", (e) => { e.preventDefault(); e.stopPropagation(); startPaneDrag(id, wrap, e); });
+  wrap.appendChild(grip);
 
   invoke("pty_spawn", { id, rows: term.rows, cols: term.cols });
   return pane;
 }
 
+// pointer-driven pane drag: a ghost follows the cursor, target pane highlights, swap on release
+function startPaneDrag(srcId, srcWrap, e0) {
+  const src = panes.get(srcId);
+  if (!src || tabLeafIds(tabs.get(src.tabId)).length < 2) return;
+  srcWrap.classList.add("drag-src");
+  document.body.classList.add("pane-dragging");
+
+  // a floating snapshot-ish ghost so the terminal visibly moves with the cursor
+  const rect = srcWrap.getBoundingClientRect();
+  const ghost = el("div", "pane-drag-ghost", "⠿ " + (tabs.get(src.tabId)?.name || "terminal"));
+  ghost.style.width = Math.min(rect.width, 280) + "px";
+  ghost.style.height = Math.min(rect.height, 170) + "px";
+  document.body.appendChild(ghost);
+  const moveGhost = (x, y) => { ghost.style.left = x + "px"; ghost.style.top = y + "px"; };
+  moveGhost(e0.clientX, e0.clientY);
+
+  const paneUnder = (x, y) => { ghost.style.display = "none"; const p = document.elementFromPoint(x, y)?.closest(".term-pane"); ghost.style.display = ""; return p; };
+  const clearOver = () => document.querySelectorAll(".term-pane.drag-over").forEach((n) => n.classList.remove("drag-over"));
+  const validTarget = (p) => p && p.dataset.id !== srcId && panes.get(p.dataset.id)?.tabId === src.tabId;
+  const onMove = (e) => {
+    moveGhost(e.clientX, e.clientY);
+    clearOver();
+    const p = paneUnder(e.clientX, e.clientY);
+    if (validTarget(p)) p.classList.add("drag-over");
+  };
+  const onUp = (e) => {
+    window.removeEventListener("mousemove", onMove);
+    window.removeEventListener("mouseup", onUp);
+    document.body.classList.remove("pane-dragging");
+    srcWrap.classList.remove("drag-src");
+    clearOver();
+    const p = paneUnder(e.clientX, e.clientY);
+    ghost.remove();
+    if (validTarget(p)) swapLeaves(srcId, p.dataset.id);
+  };
+  window.addEventListener("mousemove", onMove);
+  window.addEventListener("mouseup", onUp);
+}
+
+// drag one pane onto another (same tab) to swap their slots in the layout
+function swapInTree(node, idA, idB) {
+  if (isLeaf(node)) {
+    if (node.paneId === idA) node.paneId = idB;
+    else if (node.paneId === idB) node.paneId = idA;
+    return;
+  }
+  swapInTree(node.a, idA, idB);
+  swapInTree(node.b, idA, idB);
+}
+function swapLeaves(idA, idB) {
+  if (!idA || idA === idB) return;
+  const pa = panes.get(idA), pb = panes.get(idB);
+  if (!pa || !pb || pa.tabId !== pb.tabId) return; // swap only within the same tab
+  const tab = tabs.get(pa.tabId);
+  swapInTree(tab.root, idA, idB);
+  layoutTab(tab);
+  markActiveLeaf();
+  status("panes swapped");
+}
+
+// ── split-tree rendering ─────────────────────────────────────────────
+function renderNode(node) {
+  if (isLeaf(node)) return panes.get(node.paneId)?.el || el("div", "term-pane");
+  const box = el("div", "split split-" + node.dir);
+  const ca = renderNode(node.a); ca.style.flex = node.sizeA + " 1 0";
+  const cb = renderNode(node.b); cb.style.flex = (1 - node.sizeA) + " 1 0";
+  box.append(ca, makeDivider(node, box, ca, cb), cb);
+  return box;
+}
+// rebuild a tab's DOM from its tree (pane wraps are moved, not recreated)
+function layoutTab(tab) {
+  for (const id of tabLeafIds(tab)) { const p = panes.get(id); p?.el.parentNode?.removeChild(p.el); }
+  tab.el.innerHTML = "";
+  const rootEl = renderNode(tab.root);
+  rootEl.style.flex = "1 1 0";
+  tab.el.appendChild(rootEl);
+  requestAnimationFrame(() => fitTab(tab));
+}
+// draggable splitter between the two children of a split
+function makeDivider(node, box, elA, elB) {
+  const d = el("div", "divider divider-" + node.dir);
+  d.addEventListener("mousedown", (e) => {
+    e.preventDefault(); e.stopPropagation();
+    const horiz = node.dir === "row";
+    const rect = box.getBoundingClientRect();
+    const total = horiz ? rect.width : rect.height;
+    const start = horiz ? e.clientX : e.clientY;
+    const startA = node.sizeA;
+    const onMove = (ev) => {
+      const pos = horiz ? ev.clientX : ev.clientY;
+      const a = Math.max(0.08, Math.min(0.92, startA + (pos - start) / (total || 1)));
+      node.sizeA = a;
+      elA.style.flex = a + " 1 0";
+      elB.style.flex = (1 - a) + " 1 0";
+    };
+    const onUp = () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      document.body.style.cursor = "";
+      fitTab(tabs.get(activeTab));
+    };
+    document.body.style.cursor = horiz ? "col-resize" : "row-resize";
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  });
+  return d;
+}
+
+// split the focused leaf: dir 'row' = side-by-side (right), 'col' = stacked (down)
+function splitLeaf(paneId, dir) {
+  const pane = panes.get(paneId);
+  if (!pane) return;
+  const tab = tabs.get(pane.tabId);
+  if (!tab) return;
+  if (tabLeafIds(tab).length >= 12) return status("max splits in this tab");
+  const np = createLeafPane(tab.id);
+  tab.root = replaceLeaf(tab.root, paneId, { dir, a: { paneId }, b: { paneId: np.id }, sizeA: 0.5 });
+  tab.activeLeaf = np.id;
+  activeId = np.id;
+  layoutTab(tab);
+  markActiveLeaf();
+  renderTermTabs(); // update the ⊞ leaf-count badge
+  np.term.focus();
+}
+// close one leaf; the last leaf of a tab closes the whole tab
+function closeLeaf(paneId) {
+  const pane = panes.get(paneId);
+  if (!pane) return;
+  const tab = tabs.get(pane.tabId);
+  if (tabLeafIds(tab).length <= 1) { closeTab(tab.id); return; }
+  invoke("pty_close", { id: paneId });
+  pane.term.dispose();
+  pane.el.remove();
+  panes.delete(paneId);
+  tab.root = removeLeaf(tab.root, paneId);
+  if (tab.activeLeaf === paneId) tab.activeLeaf = tabLeafIds(tab)[0];
+  activeId = tab.activeLeaf;
+  layoutTab(tab);
+  markActiveLeaf();
+  renderTermTabs();
+  panes.get(activeId)?.term.focus();
+}
+
+// right-click a terminal pane → split / close
+function openPaneMenu(x, y, paneId) {
+  const menu = $("#ctx");
+  menu.innerHTML = "";
+  const item = (glyph, label, fn, disabled) => {
+    const r = el("div", "ctx-item" + (disabled ? " disabled" : ""));
+    r.appendChild(el("span", "ctx-glyph", glyph || ""));
+    r.appendChild(el("span", null, label));
+    if (!disabled) r.addEventListener("click", () => { closeMenu(); fn(); });
+    menu.appendChild(r);
+  };
+  item("▐", "Split right", () => splitLeaf(paneId, "row"));
+  item("▄", "Split down", () => splitLeaf(paneId, "col"));
+  menu.appendChild(el("div", "ctx-sep"));
+  item("✕", "Close pane", () => closeLeaf(paneId), panes.size <= 1);
+  menu.classList.remove("hidden");
+  const mw = 200, mh = menu.offsetHeight || 160;
+  menu.style.left = Math.min(x, window.innerWidth - mw - 8) + "px";
+  menu.style.top = Math.min(y, window.innerHeight - mh - 8) + "px";
+}
+
+// a tab = a container in #terms holding one split-tree of leaf terminals
+function createTab(name) {
+  const id = nextTabId();
+  const container = el("div", "term-tab-root");
+  container.dataset.tab = id;
+  $("#terms").appendChild(container);
+  const tab = { id, name: name || `Terminal ${tabSeq}`, pinned: false, color: null, el: container, root: null, activeLeaf: null };
+  tabs.set(id, tab);
+  const pane = createLeafPane(id);
+  tab.root = { paneId: pane.id };
+  tab.activeLeaf = pane.id;
+  layoutTab(tab);
+  return tab;
+}
+
 function refitAll() {
-  const p = panes.get(activeId);
-  if (!p) return;
-  try { p.fit.fit(); } catch (_) {}
-  invoke("pty_resize", { id: p.id, rows: p.term.rows, cols: p.term.cols });
+  const tab = tabs.get(activeTab);
+  if (tab) fitTab(tab);
 }
 
 // ── in-terminal search (⌘F) ─────────────────────────────────────────
@@ -270,34 +515,32 @@ function wireSearch() {
   $("#term-search-close").addEventListener("click", closeSearch);
 }
 
-const nextFreeId = () => {
-  for (let i = 1; i <= MAX_TABS; i++) if (!panes.has(String(i))) return String(i);
-  return null;
-};
-
 // open a brand-new terminal tab and switch to it
 function newTab() {
-  if (panes.size >= MAX_TABS) return status("max tabs reached");
-  const id = nextFreeId();
-  createPane(id);
-  activeId = id;
+  if (tabs.size >= MAX_TABS) return status("max tabs reached");
+  const tab = createTab();
+  activeTab = tab.id;
+  activeId = tab.activeLeaf;
   renderTermTabs();
   showActive();
 }
 function closeTab(id) {
-  if (panes.size <= 1) return; // keep at least one terminal
-  const p = panes.get(id);
-  if (!p) return;
-  invoke("pty_close", { id });
-  p.term.dispose();
-  p.el.remove();
-  panes.delete(id);
-  if (activeId === id) activeId = [...panes.keys()][0];
+  if (tabs.size <= 1) return; // keep at least one terminal
+  const tab = tabs.get(id);
+  if (!tab) return;
+  for (const pid of tabLeafIds(tab)) {
+    invoke("pty_close", { id: pid });
+    const p = panes.get(pid);
+    if (p) { p.term.dispose(); panes.delete(pid); }
+  }
+  tab.el.remove();
+  tabs.delete(id);
+  if (activeTab === id) activeTab = [...tabs.keys()][0];
   renderTermTabs();
   showActive();
 }
-function togglePin(id) { const p = panes.get(id); if (p) { p.pinned = !p.pinned; renderTermTabs(); } }
-function setTabColor(id, color) { const p = panes.get(id); if (p) { p.color = color; renderTermTabs(); } }
+function togglePin(id) { const t = tabs.get(id); if (t) { t.pinned = !t.pinned; renderTermTabs(); } }
+function setTabColor(id, color) { const t = tabs.get(id); if (t) { t.color = color; renderTermTabs(); } }
 
 function insertIntoActive(text) {
   invoke("pty_write", { id: activeId, data: text });
@@ -367,12 +610,12 @@ function closeMenu() {
 function startRename(id) {
   renderTermTabs();
   const nameEl = document.querySelector(`.term-tab[data-id="${id}"] .term-tab-name`);
-  const p = panes.get(id);
+  const p = tabs.get(id);
   if (nameEl && p) renameTab(p, nameEl);
 }
-// right-click a tab: rename / pin / color / close
+// right-click a tab: rename / pin / color / split / close
 function openTabMenu(x, y, id) {
-  const p = panes.get(id);
+  const p = tabs.get(id);
   if (!p) return;
   const menu = $("#ctx");
   menu.innerHTML = "";
@@ -385,6 +628,8 @@ function openTabMenu(x, y, id) {
   };
   item("✎", "Rename", () => startRename(id));
   item("●", p.pinned ? "Unpin tab" : "Pin tab", () => togglePin(id));
+  item("▐", "Split right", () => splitLeaf(p.activeLeaf, "row"));
+  item("▄", "Split down", () => splitLeaf(p.activeLeaf, "col"));
   // color swatches
   const cw = el("div", "ctx-colors");
   const none = el("button", "ctx-swatch ctx-swatch-none");
@@ -399,7 +644,7 @@ function openTabMenu(x, y, id) {
   }
   menu.appendChild(cw);
   menu.appendChild(el("div", "ctx-sep"));
-  item("✕", "Close tab", () => closeTab(id), panes.size <= 1);
+  item("✕", "Close tab", () => closeTab(id), tabs.size <= 1);
   menu.classList.remove("hidden");
   const mw = 210, mh = menu.offsetHeight || 200;
   menu.style.left = Math.min(x, window.innerWidth - mw - 8) + "px";
@@ -470,13 +715,38 @@ function appendEvent(ev) {
 
 // ---------- prompts ----------
 const scopeBadge = (scope) => el("span", `badge badge-${scope}`, scope === "global" ? "global" : "folder");
+// swap a label span for an inline text input; commit on Enter/blur, cancel on Esc
+function renameInline(spanEl, current, onCommit) {
+  const inp = el("input", "vault-rename");
+  inp.value = current || "";
+  spanEl.replaceWith(inp);
+  inp.focus(); inp.select();
+  let done = false;
+  const finish = (commit) => {
+    if (done) return; done = true;
+    const val = inp.value.trim();
+    inp.replaceWith(spanEl);
+    if (commit && val && val !== current) onCommit(val);
+  };
+  inp.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); finish(true); }
+    else if (e.key === "Escape") { e.preventDefault(); finish(false); }
+  });
+  inp.addEventListener("blur", () => finish(true));
+  inp.addEventListener("click", (e) => e.stopPropagation());
+  inp.addEventListener("dblclick", (e) => e.stopPropagation());
+}
+
 function buildPromptRow(h) {
   const row = el("div", "vault-row");
   const head = el("div", "item-head");
   const title = h.title || h.text.split("\n")[0].slice(0, 70);
-  head.appendChild(el("span", "vault-title", title));
+  const titleEl = el("span", "vault-title", title);
+  titleEl.title = "double-click to rename";
+  head.appendChild(titleEl);
   head.appendChild(scopeBadge(h.scope));
 
+  const actions = el("div", "row-actions");
   const editBtn = el("button", "row-ico", "✎");
   editBtn.title = "Load into compose to update + enhance";
   editBtn.addEventListener("click", (e) => {
@@ -488,13 +758,9 @@ function buildPromptRow(h) {
     ta.setSelectionRange(ta.value.length, ta.value.length);
     status("loaded — add your context below, then ✨ Enhance");
   });
-  head.appendChild(editBtn);
-
-  const baseBtn = el("button", "row-ico", "⚡");
+  const baseBtn = el("button", "row-ico", "↯");
   baseBtn.title = "Use as base for Enhance (keeps it, merges your context)";
   baseBtn.addEventListener("click", (e) => { e.stopPropagation(); setBase(h.text, title.slice(0, 40)); });
-  head.appendChild(baseBtn);
-
   const delBtn = el("button", "row-ico row-del", "✕");
   delBtn.title = "Delete this prompt";
   delBtn.addEventListener("click", async (e) => {
@@ -505,14 +771,31 @@ function buildPromptRow(h) {
     refreshPrompts($("#prompts-search").value);
     status("deleted");
   });
-  head.appendChild(delBtn);
+  actions.append(editBtn, baseBtn, delBtn);
+  head.appendChild(actions);
 
   row.appendChild(head);
   row.appendChild(el("div", "vault-meta", `${h.source || "manual"} · ${new Date(h.created_at * 1000).toLocaleDateString()}`));
-  row.addEventListener("click", async () => {
-    const full = await invoke("prompts_get", { scope: h.scope, slug: h.slug }).catch(() => h.text);
-    insertIntoActive(full);
-    status("inserted into terminal");
+
+  // single-click inserts (delayed so a double-click can rename instead)
+  let clickTimer;
+  row.addEventListener("click", (e) => {
+    if (e.target.closest("button") || e.target.tagName === "INPUT") return;
+    clearTimeout(clickTimer);
+    clickTimer = setTimeout(async () => {
+      const full = await invoke("prompts_get", { scope: h.scope, slug: h.slug }).catch(() => h.text);
+      insertIntoActive(full);
+      status("inserted into terminal");
+    }, 200);
+  });
+  titleEl.addEventListener("dblclick", (e) => {
+    e.stopPropagation();
+    clearTimeout(clickTimer);
+    renameInline(titleEl, title, async (val) => {
+      await invoke("prompts_set_title", { scope: h.scope, slug: h.slug, title: val }).catch(() => {});
+      refreshPrompts($("#prompts-search").value);
+      status("renamed");
+    });
   });
   return row;
 }
@@ -964,7 +1247,15 @@ async function refreshNotes() {
     chk.addEventListener("click", async (e) => { e.stopPropagation(); await invoke("notes_toggle", { id: n.id }).catch(() => {}); refreshNotes(); });
     const col = el("button", "row-ico", n.collapsed ? "▸" : "▾"); col.title = "minimize";
     col.addEventListener("click", async (e) => { e.stopPropagation(); await invoke("notes_collapse", { id: n.id }).catch(() => {}); refreshNotes(); });
-    const titleEl = el("span", "note-title", (n.text || "").split("\n")[0].slice(0, 60) || "(empty)");
+    const titleEl = el("span", "note-title", n.title || (n.text || "").split("\n")[0].slice(0, 60) || "(empty)");
+    titleEl.title = "double-click to rename";
+    titleEl.addEventListener("dblclick", (e) => {
+      e.stopPropagation();
+      renameInline(titleEl, n.title || "", async (val) => {
+        await invoke("notes_set_title", { id: n.id, title: val }).catch(() => {});
+        refreshNotes();
+      });
+    });
     const pin = el("button", "row-ico" + (n.pinned ? " active" : ""), "⊙"); pin.title = "pin";
     pin.addEventListener("click", async (e) => { e.stopPropagation(); await invoke("notes_pin", { id: n.id }).catch(() => {}); refreshNotes(); });
     const del = el("button", "row-ico row-del", "✕"); del.title = "delete";
@@ -1072,7 +1363,9 @@ async function init() {
   await listen("pty-exit", (e) =>
     panes.get(e.payload.id)?.term.write("\r\n\x1b[38;5;244m[process exited]\x1b[0m\r\n"));
 
-  createPane("1");
+  const first = createTab();
+  activeTab = first.id;
+  activeId = first.activeLeaf;
   renderTermTabs();
   showActive();
 
@@ -1126,15 +1419,16 @@ async function init() {
     if (k === "t") { e.preventDefault(); newTab(); }
     else if (k === "e") { e.preventDefault(); enhanceActive(); }
     else if (k === "b") { e.preventDefault(); setPanel($("#panel").classList.contains("hidden")); }
-    else if (k === "w") { e.preventDefault(); closeTab(activeId); }
+    else if (k === "w") { e.preventDefault(); closeLeaf(activeId); }
     else if (k === "f") { e.preventDefault(); openSearch(); }
+    else if (k === "d") { e.preventDefault(); splitLeaf(activeId, e.shiftKey ? "col" : "row"); }
     else if (k === "=" || k === "+") { e.preventDefault(); setFontSize(fontSize + 1); }
     else if (k === "-" || k === "_") { e.preventDefault(); setFontSize(fontSize - 1); }
     else if (k === "0") { e.preventDefault(); setFontSize(13); }
     else if (/^[1-9]$/.test(k)) { // ⌘1..9 switch to that tab
-      const list = orderedPanes();
+      const list = orderedTabs();
       const idx = parseInt(k, 10) - 1;
-      if (list[idx]) { e.preventDefault(); activeId = list[idx].id; showActive(); }
+      if (list[idx]) { e.preventDefault(); activeTab = list[idx].id; showActive(); }
     }
   });
   wireSearch();
