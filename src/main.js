@@ -9,6 +9,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { check } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import hljs from "highlight.js/lib/common";
 
 // ---------- DOM helpers ----------
@@ -49,10 +50,18 @@ const TERM_THEME_DARK = {
   selectionBackground: "#264F78", black: "#161B22", brightBlack: "#8B949E", red: "#F85149",
   green: "#3FB950", yellow: "#D29922", blue: "#58A6FF", magenta: "#2DD4BF", cyan: "#39C5CF", white: "#E6EDF3",
 };
+// GitHub-light ANSI palette — clean, readable colored output on a white terminal
 const TERM_THEME_LIGHT = {
-  background: "#FFFFFF", foreground: "#1B2230", cursor: "#0D9488", cursorAccent: "#FFFFFF",
-  selectionBackground: "#CDE7E3", black: "#EDF1F5", brightBlack: "#5A6472", red: "#DC2626",
-  green: "#16A34A", yellow: "#B45309", blue: "#0284C7", magenta: "#0D9488", cyan: "#0284C7", white: "#1B2230",
+  background: "#FFFFFF", foreground: "#24292F", cursor: "#6B7280", cursorAccent: "#FFFFFF",
+  selectionBackground: "#B6D6FB",
+  black: "#24292F", brightBlack: "#6E7781",
+  red: "#CF222E", brightRed: "#A40E26",
+  green: "#116329", brightGreen: "#1A7F37",
+  yellow: "#9A6700", brightYellow: "#7D4E00",
+  blue: "#0550AE", brightBlue: "#0969DA",
+  magenta: "#8250DF", brightMagenta: "#6639BA",
+  cyan: "#1B7C83", brightCyan: "#3192A0",
+  white: "#6E7781", brightWhite: "#24292F",
 };
 let currentTheme = localStorage.getItem("devcli-theme") || "light";
 const termTheme = () => (currentTheme === "light" ? TERM_THEME_LIGHT : TERM_THEME_DARK);
@@ -236,7 +245,7 @@ function registerFilePathLinks(term, paneId) {
 }
 
 // one leaf terminal (xterm + PTY) living inside a tab's split-tree
-function createLeafPane(tabId) {
+function createLeafPane(tabId, cwd) {
   const id = nextPaneId();
   const wrap = el("div", "term-pane");
   wrap.dataset.id = id;
@@ -258,6 +267,17 @@ function createLeafPane(tabId) {
     term.loadAddon(gl);
   } catch (_) { /* canvas fallback */ }
   fit.fit();
+
+  // At a plain shell prompt (normal buffer) scroll the local scrollback and
+  // swallow the wheel — otherwise a TUI that left mouse-tracking on makes the
+  // trackpad leak raw SGR mouse codes (<65;..M) into the shell as garbage.
+  wrap.addEventListener("wheel", (e) => {
+    if (term.buffer.active.type !== "normal") return; // in an app's alt-screen: let it handle scroll
+    const lines = e.deltaMode === 1 ? e.deltaY : e.deltaY / 24;
+    term.scrollLines(Math.trunc(lines) || Math.sign(e.deltaY));
+    e.preventDefault();
+    e.stopImmediatePropagation();
+  }, { capture: true, passive: false });
 
   const pane = { id, term, fit, search, draft: "", el: wrap, tabId };
   panes.set(id, pane);
@@ -290,7 +310,7 @@ function createLeafPane(tabId) {
   grip.addEventListener("mousedown", (e) => { e.preventDefault(); e.stopPropagation(); startPaneDrag(id, wrap, e); });
   wrap.appendChild(grip);
 
-  invoke("pty_spawn", { id, rows: term.rows, cols: term.cols });
+  invoke("pty_spawn", { id, rows: term.rows, cols: term.cols, cwd: cwd || null });
   return pane;
 }
 
@@ -417,6 +437,7 @@ function splitLeaf(paneId, dir) {
   markActiveLeaf();
   renderTermTabs(); // update the ⊞ leaf-count badge
   np.term.focus();
+  scheduleSave();
 }
 // close one leaf; the last leaf of a tab closes the whole tab
 function closeLeaf(paneId) {
@@ -435,6 +456,7 @@ function closeLeaf(paneId) {
   markActiveLeaf();
   renderTermTabs();
   panes.get(activeId)?.term.focus();
+  scheduleSave();
 }
 
 // right-click a terminal pane → split / close
@@ -476,6 +498,94 @@ function createTab(name) {
 function refitAll() {
   const tab = tabs.get(activeTab);
   if (tab) fitTab(tab);
+}
+
+// ── session persistence: restore tabs/splits/folders on reopen ────────
+// leaf → { cwd, claude }   split → { dir, sizeA, a, b }
+async function serializeNode(node) {
+  if (!isLeaf(node)) {
+    return { dir: node.dir, sizeA: node.sizeA, a: await serializeNode(node.a), b: await serializeNode(node.b) };
+  }
+  const [cwd, claude] = await Promise.all([
+    invoke("pty_cwd", { id: node.paneId }).catch(() => null),
+    invoke("pty_has_claude", { id: node.paneId }).catch(() => false),
+  ]);
+  return { cwd: cwd || null, claude: !!claude };
+}
+async function saveLayout() {
+  try {
+    const list = orderedTabs();
+    const out = [];
+    for (const t of list) out.push({ name: t.name, pinned: t.pinned, color: t.color, root: await serializeNode(t.root) });
+    const activeIndex = Math.max(0, list.findIndex((t) => t.id === activeTab));
+    localStorage.setItem("devcli-layout", JSON.stringify({ tabs: out, activeIndex }));
+  } catch (_) { /* best-effort */ }
+}
+let _saveTimer;
+function scheduleSave() { clearTimeout(_saveTimer); _saveTimer = setTimeout(saveLayout, 1200); }
+
+function buildSaved(tabId, node, claudePanes) {
+  if (node && node.dir) {
+    return { dir: node.dir, sizeA: node.sizeA ?? 0.5, a: buildSaved(tabId, node.a, claudePanes), b: buildSaved(tabId, node.b, claudePanes) };
+  }
+  const pane = createLeafPane(tabId, node && node.cwd);
+  if (node && node.claude) claudePanes.push(pane.id);
+  return { paneId: pane.id };
+}
+function restoreTab(saved) {
+  const id = nextTabId();
+  const container = el("div", "term-tab-root");
+  container.dataset.tab = id;
+  $("#terms").appendChild(container);
+  const tab = { id, name: saved.name || `Terminal ${tabSeq}`, pinned: !!saved.pinned, color: saved.color || null, el: container, root: null, activeLeaf: null };
+  tabs.set(id, tab);
+  const claudePanes = [];
+  tab.root = buildSaved(tab.id, saved.root, claudePanes);
+  tab.activeLeaf = tabLeafIds(tab)[0];
+  layoutTab(tab);
+  // resume Claude after the shell has settled (best-effort)
+  for (const pid of claudePanes) {
+    setTimeout(() => invoke("pty_write", { id: pid, data: "claude --continue\n" }).catch(() => {}), 1000);
+  }
+  return tab;
+}
+function restoreLayout() {
+  let saved = null;
+  try { saved = JSON.parse(localStorage.getItem("devcli-layout") || "null"); } catch (_) { saved = null; }
+  if (!saved || !Array.isArray(saved.tabs) || !saved.tabs.length) return false;
+  let first = null;
+  for (const st of saved.tabs) { const t = restoreTab(st); if (!first) first = t; }
+  const list = orderedTabs();
+  const pick = list[saved.activeIndex] || first;
+  activeTab = pick.id;
+  activeId = pick.activeLeaf;
+  return true;
+}
+// true if any pane is running a Claude session (for the quit warning)
+async function anyClaudeRunning() {
+  for (const [id] of panes) {
+    if (await invoke("pty_has_claude", { id }).catch(() => false)) return true;
+  }
+  return false;
+}
+// intercept window close: save layout, confirm, then destroy
+async function wireCloseGuard() {
+  try {
+    const win = getCurrentWindow();
+    await win.onCloseRequested(async (e) => {
+      e.preventDefault();
+      await saveLayout();
+      const running = await anyClaudeRunning();
+      const ok = await confirmDialog(
+        "Quit DevCLI?",
+        running
+          ? "A terminal is running a Claude session. Quitting stops it — reopening this window resumes it with “claude --continue”."
+          : "Your open terminals will close. Reopening restores this layout and its folders.",
+        "Quit",
+      );
+      if (ok) await win.destroy();
+    });
+  } catch (_) { /* non-Tauri / no window API — skip */ }
 }
 
 // ── in-terminal search (⌘F) ─────────────────────────────────────────
@@ -525,6 +635,7 @@ function newTab() {
   activeId = tab.activeLeaf;
   renderTermTabs();
   showActive();
+  scheduleSave();
 }
 function closeTab(id) {
   if (tabs.size <= 1) return; // keep at least one terminal
@@ -540,8 +651,9 @@ function closeTab(id) {
   if (activeTab === id) activeTab = [...tabs.keys()][0];
   renderTermTabs();
   showActive();
+  scheduleSave();
 }
-function togglePin(id) { const t = tabs.get(id); if (t) { t.pinned = !t.pinned; renderTermTabs(); } }
+function togglePin(id) { const t = tabs.get(id); if (t) { t.pinned = !t.pinned; renderTermTabs(); scheduleSave(); } }
 function setTabColor(id, color) { const t = tabs.get(id); if (t) { t.color = color; renderTermTabs(); } }
 
 function insertIntoActive(text) {
@@ -1414,6 +1526,7 @@ async function syncProjectDir() {
   $("#cwd-label").textContent = "📁 " + (cwd.split("/").filter(Boolean).pop() || cwd);
   $("#cwd-label").title = cwd + " — the panel follows this folder";
   refreshActivePanel();
+  scheduleSave(); // remember the new folder for session restore
 }
 
 // ---------- boot ----------
@@ -1425,11 +1538,15 @@ async function init() {
   await listen("pty-exit", (e) =>
     panes.get(e.payload.id)?.term.write("\r\n\x1b[38;5;244m[process exited]\x1b[0m\r\n"));
 
-  const first = createTab();
-  activeTab = first.id;
-  activeId = first.activeLeaf;
+  // restore last session's tabs/splits/folders, else start one fresh terminal
+  if (!restoreLayout()) {
+    const first = createTab();
+    activeTab = first.id;
+    activeId = first.activeLeaf;
+  }
   renderTermTabs();
   showActive();
+  wireCloseGuard(); // warn before quitting (esp. with a running Claude session)
 
   // watch prompt folders; refresh the list when they change
   invoke("prompts_watch").catch(() => {});

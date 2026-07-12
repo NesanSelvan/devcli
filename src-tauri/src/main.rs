@@ -104,7 +104,7 @@ struct PtyId {
 // ---- terminal (multi-pane, keyed by id) ----
 
 #[tauri::command]
-fn pty_spawn(app: AppHandle, state: State<'_, AppState>, id: String, rows: u16, cols: u16) -> Result<(), String> {
+fn pty_spawn(app: AppHandle, state: State<'_, AppState>, id: String, rows: u16, cols: u16, cwd: Option<String>) -> Result<(), String> {
     let pty_system = native_pty_system();
     let pair = pty_system
         .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
@@ -112,7 +112,12 @@ fn pty_spawn(app: AppHandle, state: State<'_, AppState>, id: String, rows: u16, 
 
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
     let mut cmd = CommandBuilder::new(shell);
-    cmd.cwd(state.dir()); // open new terminals in the last-used folder
+    // restore into the pane's saved folder if given + still valid, else the last-used folder
+    let start = cwd
+        .map(std::path::PathBuf::from)
+        .filter(|p| p.is_dir())
+        .unwrap_or_else(|| state.dir());
+    cmd.cwd(start);
     cmd.env("TERM", "xterm-256color");
 
     let mut child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
@@ -189,6 +194,54 @@ fn shell_cwd(pid: u32) -> Option<String> {
 fn pty_cwd(state: State<'_, AppState>, id: String) -> Option<String> {
     let pid = state.ptys.lock().unwrap().get(&id).and_then(|p| p.child_pid)?;
     shell_cwd(pid)
+}
+
+/// True if the terminal's shell has a descendant process running Claude Code
+/// (used to warn on quit + mark panes to auto-resume with `claude --continue`).
+fn has_claude_descendant(root: u32) -> bool {
+    let out = match std::process::Command::new("ps").args(["-Ao", "pid=,ppid=,command="]).output() {
+        Ok(o) => o,
+        Err(_) => return false,
+    };
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut cmd: HashMap<u32, String> = HashMap::new();
+    for line in text.lines() {
+        let toks: Vec<&str> = line.split_whitespace().collect();
+        if toks.len() < 3 {
+            continue;
+        }
+        if let (Ok(pid), Ok(ppid)) = (toks[0].parse::<u32>(), toks[1].parse::<u32>()) {
+            children.entry(ppid).or_default().push(pid);
+            cmd.insert(pid, toks[2..].join(" "));
+        }
+    }
+    let mut stack = vec![root];
+    let mut seen = std::collections::HashSet::new();
+    while let Some(p) = stack.pop() {
+        if !seen.insert(p) {
+            continue;
+        }
+        if p != root {
+            if let Some(c) = cmd.get(&p) {
+                if c.to_lowercase().contains("claude") {
+                    return true;
+                }
+            }
+        }
+        if let Some(kids) = children.get(&p) {
+            stack.extend(kids);
+        }
+    }
+    false
+}
+
+#[tauri::command]
+fn pty_has_claude(state: State<'_, AppState>, id: String) -> bool {
+    match state.ptys.lock().unwrap().get(&id).and_then(|p| p.child_pid) {
+        Some(pid) => has_claude_descendant(pid),
+        None => false,
+    }
 }
 
 /// Re-scope the panel (prompts/notes/agents/skills/mcp) to a folder.
@@ -597,6 +650,7 @@ fn main() {
             pty_resize,
             pty_close,
             pty_cwd,
+            pty_has_claude,
             set_project_dir,
             prompts_search,
             prompts_get,

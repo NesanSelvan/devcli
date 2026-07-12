@@ -24,16 +24,17 @@
 :root[data-theme="light"] {
   --bg-base:   #FFFFFF;
   --bg-panel:  #F6F8FA;
-  --bg-elev:   #EDF1F5;
-  --border:    #D5DBE2;
-  --text:      #1B2230;
-  --text-dim:  #5A6472;
-  --accent:    #A9B0BB;
-  --accent-2:  #0284C7;
-  --success:   #16A34A;
-  --warn:      #B45309;
-  --error:     #DC2626;
-  --grad: linear-gradient(135deg, #A9B0BB 0%, #C7CDD6 100%);
+  --bg-elev:   #ECEFF3;
+  --bg-hover:  #E4E9EF;
+  --border:    #D0D7DE;
+  --text:      #1F2328;
+  --text-dim:  #656D76;
+  --accent:    #6B7280;   /* readable slate grey — active states show on white */
+  --accent-2:  #0969DA;
+  --success:   #1A7F37;
+  --warn:      #9A6700;
+  --error:     #CF222E;
+  --grad: linear-gradient(135deg, #6B7280 0%, #939BA6 100%);
 }
 
 * { box-sizing: border-box; }
