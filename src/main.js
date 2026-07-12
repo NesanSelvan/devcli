@@ -9,6 +9,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { check } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
+import hljs from "highlight.js/lib/common";
 
 // ---------- DOM helpers ----------
 const $ = (s) => document.querySelector(s);
@@ -209,7 +210,7 @@ function renameTab(pane, nameEl) {
 // match file paths / filenames in terminal output (e.g. dummy.txt, src/main.rs,
 // ./x.js:12). Requires a "." + 2–8 char extension so prose like "e.g" is ignored.
 const FILE_PATH_RE = /(?:\.{0,2}\/)?[\w@.+\-]+(?:\/[\w@.+\-]+)*\.[A-Za-z][A-Za-z0-9]{1,7}(?::\d+)?/g;
-function registerFilePathLinks(term) {
+function registerFilePathLinks(term, paneId) {
   term.registerLinkProvider({
     provideLinks(y, callback) {
       const line = term.buffer.active.getLine(y - 1);
@@ -225,7 +226,8 @@ function registerFilePathLinks(term) {
         links.push({
           range: { start: { x: m.index + 1, y }, end: { x: m.index + raw.length, y } },
           text: raw,
-          activate: (_e, t) => { const p = t.replace(/:\d+$/, ""); previewFile(p, p); },
+          // resolve relative paths against THIS terminal's live cwd (not the panel dir)
+          activate: (_e, t) => { const p = t.replace(/:\d+$/, ""); previewFile(p, p, paneId); },
         });
       }
       callback(links.length ? links : undefined);
@@ -247,7 +249,7 @@ function createLeafPane(tabId) {
   term.loadAddon(search);
   // URLs in the terminal become clickable — open in the default browser
   term.loadAddon(new WebLinksAddon((_e, uri) => invoke("open_external", { url: uri })));
-  registerFilePathLinks(term); // file paths → preview in the side panel
+  registerFilePathLinks(term, id); // file paths → preview, resolved against this pane's cwd
   term.open(wrap);
   // GPU-accelerated rendering; fall back to canvas if WebGL is unavailable
   try {
@@ -1130,28 +1132,88 @@ async function refreshMcp() {
 // ---------- file panel (click a terminal path → open a dedicated file panel) ----------
 // Opens the standalone file panel showing one file. Relative paths resolve
 // against the project dir (rust side). Triggered by clicking a path in the terminal.
-async function previewFile(path, display) {
+// file extension → highlight.js language id (unknowns fall back to auto-detect)
+const EXT_LANG = {
+  sql: "sql", js: "javascript", mjs: "javascript", cjs: "javascript", jsx: "javascript",
+  ts: "typescript", tsx: "typescript", py: "python", rs: "rust", go: "go", rb: "ruby",
+  java: "java", kt: "kotlin", swift: "swift", c: "c", h: "c", cpp: "cpp", cc: "cpp",
+  cs: "csharp", php: "php", sh: "bash", bash: "bash", zsh: "bash", json: "json",
+  yaml: "yaml", yml: "yaml", toml: "ini", ini: "ini", css: "css", scss: "scss",
+  html: "xml", xml: "xml", svg: "xml", md: "markdown", markdown: "markdown",
+  dockerfile: "dockerfile", makefile: "makefile", lua: "lua", r: "r", diff: "diff",
+};
+let filePanelRaw = ""; // raw content, for the copy button
+async function previewFile(path, display, paneId) {
+  // resolve a relative path against the clicked terminal's live shell cwd
+  let resolved = path;
+  if (paneId && !path.startsWith("/") && !path.startsWith("~")) {
+    const cwd = await invoke("pty_cwd", { id: paneId }).catch(() => null);
+    if (cwd) resolved = cwd.replace(/\/+$/, "") + "/" + path;
+  }
   let content;
   try {
-    content = await invoke("read_file", { path });
+    content = await invoke("read_file", { path: resolved });
   } catch (e) {
     status("⚠ " + e); // not a real file / unreadable — don't open an empty panel
     return;
   }
   const panel = $("#file-panel");
   $("#file-panel-name").textContent = display || path;
-  panel.dataset.path = path;
-  $("#file-panel-body").textContent = content || "(empty)";
+  panel.dataset.path = resolved; // reveal-in-Finder uses the resolved absolute path
+  filePanelRaw = content || "";
+  const body = $("#file-panel-body");
+  const ext = (path.split(".").pop() || "").toLowerCase();
+  const base = (path.split("/").pop() || "").toLowerCase();
+  const lang = EXT_LANG[ext] || EXT_LANG[base]; // e.g. Dockerfile / Makefile have no ext
+  try {
+    const res = lang && hljs.getLanguage(lang)
+      ? hljs.highlight(filePanelRaw, { language: lang })
+      : hljs.highlightAuto(filePanelRaw);
+    body.innerHTML = res.value || "(empty)";
+    body.className = "file-panel-body hljs";
+  } catch (_) {
+    body.textContent = filePanelRaw || "(empty)"; // never fail the preview over highlighting
+    body.className = "file-panel-body";
+  }
   panel.classList.remove("hidden"); // overlays the side panel; terminal keeps its width
 }
 function closeFilePanel() {
   $("#file-panel").classList.add("hidden");
+}
+// clamp + apply the preview width (right-anchored overlay)
+function setFilePanelWidth(w) {
+  const max = Math.max(360, window.innerWidth - 120);
+  const width = Math.round(Math.max(280, Math.min(w, max)));
+  $("#file-panel").style.width = width + "px";
+  localStorage.setItem("devcli-filepanel-width", String(width));
 }
 function wireFilePanel() {
   $("#file-panel-close")?.addEventListener("click", closeFilePanel);
   $("#file-panel-open")?.addEventListener("click", () => {
     const p = $("#file-panel").dataset.path;
     if (p) invoke("reveal_file", { path: p }).catch((e) => status("⚠ " + e));
+  });
+  $("#file-panel-copy")?.addEventListener("click", async () => {
+    try { await navigator.clipboard.writeText(filePanelRaw); status("copied file contents"); }
+    catch { status("⚠ copy failed"); }
+  });
+  // restore saved width
+  const saved = parseInt(localStorage.getItem("devcli-filepanel-width") || "", 10);
+  if (saved) setFilePanelWidth(saved);
+  // drag the left edge to resize (panel is anchored to the right)
+  const rez = $("#file-panel-resizer");
+  rez?.addEventListener("mousedown", (e) => {
+    e.preventDefault();
+    const right = $("#file-panel").getBoundingClientRect().right;
+    document.body.classList.add("filepanel-resizing");
+    const onMove = (ev) => setFilePanelWidth(right - ev.clientX);
+    const onUp = () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      document.body.classList.remove("filepanel-resizing");
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
   });
 }
 
