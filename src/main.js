@@ -74,16 +74,13 @@ function status(msg, sticky) {
 // ---------- theme ----------
 const TERM_THEME_DARK = {
   background: "#0D1117", foreground: "#E6EDF3", cursor: "#2DD4BF", cursorAccent: "#0D1117",
-  // clear, uniform selection: a solid blue with forced white text so any coloured
-  // token stays readable when highlighted (was a muted blue with mixed text colours)
-  selectionBackground: "#3563A9", selectionForeground: "#FFFFFF", selectionInactiveBackground: "#2A3D5A",
-  black: "#161B22", brightBlack: "#8B949E", red: "#F85149",
+  selectionBackground: "#264F78", black: "#161B22", brightBlack: "#8B949E", red: "#F85149",
   green: "#3FB950", yellow: "#D29922", blue: "#58A6FF", magenta: "#2DD4BF", cyan: "#39C5CF", white: "#E6EDF3",
 };
 // GitHub-light ANSI palette — clean, readable colored output on a white terminal
 const TERM_THEME_LIGHT = {
-  background: "#FFFFFF", foreground: "#24292F", cursor: "#2563EB", cursorAccent: "#FFFFFF",
-  selectionBackground: "#AACDF7", selectionForeground: "#0A2540", selectionInactiveBackground: "#D6E4F7",
+  background: "#FFFFFF", foreground: "#24292F", cursor: "#6B7280", cursorAccent: "#FFFFFF",
+  selectionBackground: "#B6D6FB",
   black: "#24292F", brightBlack: "#6E7781",
   red: "#CF222E", brightRed: "#A40E26",
   green: "#116329", brightGreen: "#1A7F37",
@@ -236,9 +233,9 @@ function reorderTabs(draggedId, targetId, before) {
 function renderTermTabs() {
   const bar = $("#term-tabs");
   if (!bar) return;
-  // grab ＋ and the drag filler BEFORE clearing — they live inside the row now,
-  // so innerHTML="" would destroy them (holding refs keeps the elements alive)
-  const addBtn = $("#tab-add"), dragFill = $("#appbar-drag");
+  // grab ＋ BEFORE clearing — it lives inside the row, so innerHTML="" would
+  // destroy it (holding a ref keeps the element alive)
+  const addBtn = $("#tab-add");
   bar.innerHTML = "";
   for (const p of orderedTabs()) {
     const nLeaves = tabLeafIds(p).length;
@@ -266,10 +263,33 @@ function renderTermTabs() {
     });
     bar.appendChild(tab);
   }
-  // keep ＋ right after the last tab, then the draggable filler — both live
-  // inside the tab row so the ＋ never floats off in empty space
+  // keep ＋ right after the last tab; the empty tab-row space after it is a
+  // window-drag region (term-tabs has data-tauri-drag-region)
   if (addBtn) bar.appendChild(addBtn);
-  if (dragFill) bar.appendChild(dragFill);
+  sizeTabs();
+}
+
+// Give every tab a fixed pixel width = 25% of the window, and only shrink (all
+// tabs equally) once they'd overflow the row. Done in JS with real px because
+// a CSS `flex-basis: 25vw` is unreliable inside this nested flex row in WKWebView
+// (it collapsed tabs to their min width even with plenty of room).
+function sizeTabs() {
+  const bar = $("#term-tabs");
+  if (!bar) return;
+  const tabsEls = [...bar.querySelectorAll(".term-tab")];
+  const n = tabsEls.length;
+  if (!n) return;
+  const base = Math.round(window.innerWidth * 0.25);      // 25% of the window per tab
+  // Measure against the whole appbar, not term-tabs (which is squeezed by the
+  // grow:1 .appbar-drag sibling). Reserve the traffic-light pad, cwd label, the
+  // ＋ button, and a drag strip; the tabs share whatever's left.
+  const appbar = document.querySelector(".appbar");
+  const addW = $("#tab-add")?.offsetWidth || 30;
+  const cwdW = $("#cwd-label")?.offsetWidth || 0;
+  const dragStrip = 32;                                   // always keep a window-drag strip after the tabs
+  const avail = (appbar?.clientWidth || window.innerWidth) - 90 /*L+R pad*/ - cwdW - addW - dragStrip - 4 * n;
+  const w = Math.max(60, Math.min(base, Math.floor(avail / n))); // stay at 25% until the row is full
+  for (const t of tabsEls) t.style.flex = `0 0 ${w}px`;
 }
 let tabDragMoved = false;
 // drag a tab horizontally to reorder; a blue edge marks the drop slot
@@ -313,12 +333,36 @@ function renameTab(pane, nameEl) {
   nameEl.replaceWith(inp);
   inp.focus();
   inp.select();
-  const commit = () => { pane.name = inp.value.trim() || pane.name; renderTermTabs(); };
+  const commit = () => {
+    const v = inp.value.trim();
+    if (v) { pane.name = v; pane.autoNamed = false; } // hand-named → stop auto-adopting the Claude session title
+    renderTermTabs();
+    scheduleSave();
+  };
   inp.addEventListener("keydown", (e) => {
     if (e.key === "Enter") commit();
     else if (e.key === "Escape") renderTermTabs();
   });
   inp.addEventListener("blur", commit);
+}
+
+// Turn a terminal-title change into the tab name. Only fires for tabs the user
+// hasn't renamed by hand, and only while a real Claude process is running in the
+// pane — so shell-set cwd/hostname titles never hijack the name.
+async function adoptClaudeTitle(pane, raw) {
+  const tab = tabs.get(pane.tabId);
+  if (!tab || tab.autoNamed === false) return;                 // hand-named — leave it
+  let name = (raw || "").replace(/^[\s✳✻✽✢∗*·•]+/, "").trim(); // strip Claude's leading glyph
+  if (name.length < 2) return;
+  if (/^[~/.]/.test(name)) return;                             // a path, not a session name
+  if (/^(claude|-?(ba|z|)sh|node|login|tmux)$/i.test(name)) return; // shell/proc default titles
+  if (name.length > 40) name = name.slice(0, 39) + "…";
+  if (tab.name === name) return;
+  if (!(await invoke("pty_has_claude", { id: pane.id }).catch(() => false))) return;
+  tab.name = name;
+  tab.autoNamed = true;
+  renderTermTabs();
+  scheduleSave();
 }
 
 // match file paths / filenames in terminal output (e.g. dummy.txt, src/main.rs,
@@ -393,6 +437,10 @@ function createLeafPane(tabId, cwd) {
 
   const pane = { id, term, fit, search, draft: "", el: wrap, tabId };
   panes.set(id, pane);
+
+  // Claude Code sets the terminal title (OSC 0/2) to the session's summary.
+  // Adopt it as the tab name so tabs read like their Claude session.
+  term.onTitleChange((raw) => adoptClaudeTitle(pane, raw));
 
   // copy-on-select — highlighting text puts it on the clipboard (iTerm/Warp behaviour)
   term.onSelectionChange(() => {
@@ -628,13 +676,24 @@ function openPaneMenu(x, y, paneId) {
   menu.style.top = Math.min(y, window.innerHeight - mh - 8) + "px";
 }
 
+// next "Terminal N" — one past the highest default-named tab (independent of the
+// id counter, so numbers stay sequential and unique instead of jumping around).
+function nextTermNumber() {
+  let max = 0;
+  for (const t of tabs.values()) {
+    const m = /^Terminal (\d+)$/.exec(t.name || "");
+    if (m) max = Math.max(max, +m[1]);
+  }
+  return max + 1;
+}
+
 // a tab = a container in #terms holding one split-tree of leaf terminals
 function createTab(name) {
   const id = nextTabId();
   const container = el("div", "term-tab-root");
   container.dataset.tab = id;
   $("#terms").appendChild(container);
-  const tab = { id, name: name || `Terminal ${tabSeq}`, pinned: false, color: null, el: container, root: null, activeLeaf: null };
+  const tab = { id, name: name || `Terminal ${nextTermNumber()}`, autoNamed: !name, pinned: false, color: null, el: container, root: null, activeLeaf: null };
   tabs.set(id, tab);
   const pane = createLeafPane(id);
   tab.root = { paneId: pane.id };
@@ -664,7 +723,7 @@ async function saveLayout() {
   try {
     const list = orderedTabs();
     const out = [];
-    for (const t of list) out.push({ name: t.name, pinned: t.pinned, color: t.color, root: await serializeNode(t.root) });
+    for (const t of list) out.push({ name: t.name, autoNamed: t.autoNamed !== false, pinned: t.pinned, color: t.color, root: await serializeNode(t.root) });
     const activeIndex = Math.max(0, list.findIndex((t) => t.id === activeTab));
     localStorage.setItem("devcli-layout", JSON.stringify({ tabs: out, activeIndex }));
   } catch (_) { /* best-effort */ }
@@ -685,7 +744,10 @@ function restoreTab(saved) {
   const container = el("div", "term-tab-root");
   container.dataset.tab = id;
   $("#terms").appendChild(container);
-  const tab = { id, name: saved.name || `Terminal ${tabSeq}`, pinned: !!saved.pinned, color: saved.color || null, el: container, root: null, activeLeaf: null };
+  // keep hand-picked names; renumber default "Terminal N" tabs into a clean sequence
+  const autoNamed = saved.autoNamed !== false;
+  const name = autoNamed ? `Terminal ${nextTermNumber()}` : (saved.name || `Terminal ${nextTermNumber()}`);
+  const tab = { id, name, autoNamed, pinned: !!saved.pinned, color: saved.color || null, el: container, root: null, activeLeaf: null };
   tabs.set(id, tab);
   const claudePanes = [];
   tab.root = buildSaved(tab.id, saved.root, claudePanes);
@@ -1213,11 +1275,48 @@ function openItemMenu(x, y, kind, e, groups) {
   menu.appendChild(el("div", "ctx-sep"));
   if (e.group) item("− Remove from group", async () => { await invoke("item_set_group", { kind, itemId: e.id, group: "" }); refreshKind(kind); });
   item(e.hidden ? "Unhide" : "Hide", async () => { await invoke("item_hide", { kind, itemId: e.id, hidden: !e.hidden }); refreshKind(kind); });
+  if (e.path && (kind === "skill" || kind === "agent")) {
+    menu.appendChild(el("div", "ctx-sep"));
+    item("🗑  Remove", () => removeItemWithUndo(kind, e));
+  }
   menu.classList.remove("hidden");
   const mw = 210, mh = menu.offsetHeight || 240;
   menu.style.left = Math.min(x, window.innerWidth - mw - 8) + "px";
   menu.style.top = Math.min(y, window.innerHeight - mh - 8) + "px";
   setTimeout(() => inp.focus(), 0);
+}
+
+// remove a skill/agent with a 5s undo. The file is NOT touched until the timer
+// elapses — undo just cancels; commit deletes on disk then refreshes the list.
+function removeItemWithUndo(kind, e) {
+  e.el.style.display = "none"; // hide the row right away
+  showUndoToast(`Removed ${e.label}`, 5000,
+    () => { e.el.style.display = ""; },
+    async () => {
+      try { await invoke("item_delete", { path: e.path, kind }); }
+      catch (err) { status("remove failed: " + err); e.el.style.display = ""; return; }
+      refreshKind(kind);
+    });
+}
+let _undoToast = null;
+function showUndoToast(text, ms, onUndo, onCommit) {
+  if (_undoToast) _undoToast.commitNow(); // flush a pending one, don't stack
+  const bar = el("div", "undo-toast");
+  bar.appendChild(el("span", "undo-text", text));
+  const btn = el("button", "undo-btn", "Undo");
+  const fill = el("div", "undo-fill");
+  bar.append(btn, fill);
+  document.body.appendChild(bar);
+  let done = false;
+  const finish = (undo) => {
+    if (done) return; done = true;
+    clearTimeout(timer); bar.remove(); _undoToast = null;
+    undo ? onUndo() : onCommit();
+  };
+  const timer = setTimeout(() => finish(false), ms);
+  btn.addEventListener("click", () => finish(true));
+  _undoToast = { commitNow: () => finish(false) };
+  requestAnimationFrame(() => { fill.style.transition = `width ${ms}ms linear`; fill.style.width = "0%"; });
 }
 // render entries [{id, el, group, hidden}] into collapsible group sections,
 // with a group bar (+ new group, show hidden) and per-row group/hide controls
@@ -1428,7 +1527,7 @@ async function refreshList(kind, cmd, listSel, searchSel) {
   }
   const entries = filtered.map((it) => {
     const m = mm.get(it.name) || {};
-    return { id: it.name, el: buildItemRow(it), group: m.group || "", hidden: !!m.hidden, label: it.name };
+    return { id: it.name, el: buildItemRow(it), group: m.group || "", hidden: !!m.hidden, label: it.name, path: it.path };
   });
   renderGrouped(listSel, kind, entries);
 }
@@ -1738,10 +1837,17 @@ function refreshActivePanel() {
 async function syncProjectDir() {
   const cwd = await invoke("pty_cwd", { id: activeId }).catch(() => null);
   if (!cwd) return;
+  const base = cwd.split("/").filter(Boolean).pop() || cwd;
+  // tab name follows the active folder — unless hand-renamed, or a Claude session
+  // is running (then adoptClaudeTitle owns the name and we leave it alone)
+  const at = tabs.get(activeTab);
+  if (at && at.autoNamed !== false) {
+    const claude = await invoke("pty_has_claude", { id: activeId }).catch(() => false);
+    if (!claude && at.name !== base) { at.name = base; renderTermTabs(); }
+  }
   if (cwd !== currentDir) {
     currentDir = cwd;
     await invoke("set_project_dir", { path: cwd }).catch(() => {});
-    const base = cwd.split("/").filter(Boolean).pop() || cwd;
     $("#cwd-label").textContent = "📁 " + base;
     $("#cwd-label").title = cwd + " — the panel follows this folder";
     $("#sb-folder-name").textContent = base;
@@ -1856,6 +1962,8 @@ async function init() {
   panes.get("1").term.focus();
   setTimeout(syncProjectDir, 800);      // initial folder detect
   setInterval(syncProjectDir, 1500);    // follow `cd` in the active terminal
+  window.addEventListener("resize", () => { sizeTabs(); refitAll(); }); // keep 25% tab width on window resize
+  sizeTabs();                           // size once the appbar has a real width
 }
 
 init().catch((err) => {

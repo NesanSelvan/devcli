@@ -8,10 +8,9 @@
   </head>
   <body>
     <div id="app">
-      <header class="appbar">
-        <div class="term-tabs" id="term-tabs"></div>
+      <header class="appbar" data-tauri-drag-region>
+        <div class="term-tabs" id="term-tabs" data-tauri-drag-region></div>
         <button class="tab-add" id="tab-add" title="New terminal (⌘T)">＋</button>
-        <div class="appbar-drag" data-tauri-drag-region></div>
         <span class="cwd-label" id="cwd-label" title="the panel follows this folder"></span>
       </header>
 

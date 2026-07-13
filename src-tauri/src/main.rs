@@ -586,8 +586,9 @@ fn build_meta(draft: &str, base: Option<&str>, kind: &str) -> String {
         Some(b) if !b.trim().is_empty() => {
             let subject = if is_note { "note editor" } else { "prompt editor" };
             let note_rule = if is_note {
-                " Keep the OUTPUT a short note/task — a line or two, never a paragraph, unless the \
-                 instruction explicitly asks for more detail."
+                " Keep the OUTPUT formatted as a note: a short TITLE on the first line, then \
+                 concise bullet points below (each starting with \"- \"), never a paragraph, \
+                 unless the instruction explicitly asks otherwise."
             } else {
                 ""
             };
@@ -606,11 +607,13 @@ fn build_meta(draft: &str, base: Option<&str>, kind: &str) -> String {
             )
         }
         _ if is_note => format!(
-            "You are refining a quick note or to-do for a task list. Rewrite the draft into a short, \
-             clear, actionable note — ideally ONE line, at most two. Use imperative phrasing, cut \
-             filler, keep any links or IDs intact. Do NOT expand it into a paragraph and do NOT add \
-             sections or headings unless the draft explicitly asks for detail. Return ONLY the note \
-             text — no preamble, no explanation, no quotes.\n\nDRAFT:\n{draft}"
+            "You are refining a quick note or to-do for a task list. Rewrite the draft into a \
+             short TITLE on the FIRST line (a few words, no trailing punctuation, no markdown \
+             heading marks), then the key details as concise bullet points below — one per line, \
+             each starting with \"- \". Use imperative phrasing, cut filler, keep any links or IDs \
+             intact. If the draft is trivial with nothing to break out, a title plus a single \
+             bullet is fine. Return ONLY the note text (title line + bullets) — no preamble, no \
+             explanation, no quotes, no code fences.\n\nDRAFT:\n{draft}"
         ),
         _ => format!(
             "You are a prompt engineer for a coding agent. Rewrite the draft into a clear, \
@@ -753,6 +756,7 @@ fn main() {
             session::prompts_watch,
             agents::agents_list,
             agents::skills_list,
+            agents::item_delete,
         ])
         .run(tauri::generate_context!())
         .expect("error while running DevCLI");

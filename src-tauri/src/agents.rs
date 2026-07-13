@@ -179,3 +179,27 @@ pub fn skills_list(state: tauri::State<'_, crate::AppState>) -> Vec<Item> {
     dedupe_by_name(&mut out);
     out
 }
+
+/// Delete a skill or agent by its file path. Guarded: the path must live inside a
+/// `.claude/skills/` or `.claude/agents/` dir. Skills delete the containing folder
+/// (SKILL.md + assets); agents delete the single .md file.
+#[tauri::command]
+pub fn item_delete(path: String, kind: String) -> Result<(), String> {
+    let norm = path.replace('\\', "/");
+    let in_skills = norm.contains("/.claude/skills/");
+    let in_agents = norm.contains("/.claude/agents/");
+    if !in_skills && !in_agents {
+        return Err("refusing to delete outside .claude skills/agents".into());
+    }
+    let p = Path::new(&path);
+    if kind == "skill" {
+        let dir = p.parent().ok_or("no parent dir")?;
+        // never delete the skills root itself — only a skill's own subfolder
+        if dir.file_name().map(|n| n == "skills").unwrap_or(true) {
+            return Err("unexpected skill layout; not deleting".into());
+        }
+        std::fs::remove_dir_all(dir).map_err(|e| e.to_string())
+    } else {
+        std::fs::remove_file(p).map_err(|e| e.to_string())
+    }
+}
