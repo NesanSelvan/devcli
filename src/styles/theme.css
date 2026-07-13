@@ -11,6 +11,7 @@
   --success:   #3FB950;
   --warn:      #D29922;
   --error:     #F85149;
+  --on-accent: #04171a;   /* text on an --accent-filled surface (dark theme) */
   --grad: linear-gradient(135deg, #C7CDD6 0%, #9BA3AE 100%);
 
   --font-brand: "Space Grotesk", system-ui, sans-serif;
@@ -22,19 +23,20 @@
 }
 
 :root[data-theme="light"] {
-  --bg-base:   #FFFFFF;
-  --bg-panel:  #F6F8FA;
-  --bg-elev:   #ECEFF3;
-  --bg-hover:  #E4E9EF;
-  --border:    #D0D7DE;
-  --text:      #1F2328;
-  --text-dim:  #656D76;
-  --accent:    #6B7280;   /* readable slate grey — active states show on white */
-  --accent-2:  #0969DA;
-  --success:   #1A7F37;
+  --bg-base:   #FFFFFF;   /* main content / terminal */
+  --bg-panel:  #EEF0F3;   /* side panel + appbar — visibly separated from white */
+  --bg-elev:   #E3E6EB;   /* cards / buttons / hover */
+  --bg-hover:  #D8DCE3;
+  --border:    #C6CCD4;   /* hairlines you can actually see on white */
+  --text:      #14171A;   /* near-black, crisp */
+  --text-dim:  #576068;   /* readable secondary */
+  --accent:    #2563EB;   /* vivid blue — active tabs, buttons, focus all pop */
+  --accent-2:  #1A66E0;   /* links */
+  --success:   #157F3B;
   --warn:      #9A6700;
-  --error:     #CF222E;
-  --grad: linear-gradient(135deg, #6B7280 0%, #939BA6 100%);
+  --error:     #D1242F;
+  --on-accent: #FFFFFF;   /* white text on the blue accent */
+  --grad: linear-gradient(135deg, #2563EB 0%, #5B8DEF 100%);
 }
 
 * { box-sizing: border-box; }
@@ -88,18 +90,18 @@ body {
 .kbd-hint:disabled { opacity: .5; cursor: default; }
 .kbd-hint kbd { font-family: var(--font-mono); color: var(--accent); font-size: 11px; }
 .kbd-hint.accent {
-  color: #04171a;
+  color: var(--on-accent);
   font-weight: 600;
   border-color: transparent;
   background: var(--accent);
 }
-.kbd-hint.accent kbd { color: #04171a; opacity: .7; }
+.kbd-hint.accent kbd { color: var(--on-accent); opacity: .7; }
 .kbd-hint.icon { padding: 5px 9px; font-size: 14px; }
 
 /* workspace: terminal grid (left) + panel (right) */
 .workspace { flex: 1 1 auto; min-height: 0; display: flex; position: relative; }
 
-.terms { flex: 1 1 auto; min-width: 0; min-height: 0; display: flex; position: relative; }
+.terms { flex: 1 1 auto; min-width: 0; min-height: 0; display: flex; flex-direction: column; position: relative; }
 
 /* floating find bar (⌘F) — top-right of the terminal area */
 .term-search {
@@ -150,9 +152,35 @@ body {
 .term-pane .xterm { height: 100%; }
 .term-pane .xterm-viewport { background: transparent !important; }
 
+/* ── Warp-style context bar (bottom of the terminal column) ── */
+.statusbar {
+  flex: 0 0 auto;
+  display: flex; align-items: center; gap: 8px;
+  padding: 7px 12px;
+  background: var(--bg-base);
+  border-top: 1px solid var(--border);
+}
+.sb-spacer { flex: 1 1 auto; }
+.sb-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 4px 11px; border-radius: 999px;
+  background: var(--bg-panel); border: 1px solid var(--border);
+  color: var(--text-dim);
+  font-size: 11.5px; font-family: var(--font-mono);
+  white-space: nowrap; max-width: 280px;
+  transition: color 120ms ease, border-color 120ms ease, background 120ms ease;
+}
+.sb-chip:hover { color: var(--text); border-color: var(--text-dim); background: var(--bg-elev); }
+.sb-chip svg { flex: 0 0 auto; opacity: .8; }
+.sb-chip span { overflow: hidden; text-overflow: ellipsis; }
+.sb-chip.hidden { display: none; }
+/* agent chip lights up when a live Claude session is detected */
+.sb-chip.live { color: var(--accent-2); border-color: var(--accent-2); }
+.sb-chip.live svg { opacity: 1; }
+
 /* drag-to-reposition split panes */
 .pane-grip {
-  position: absolute; top: 4px; right: 8px; z-index: 25;
+  position: absolute; top: 4px; right: 40px; z-index: 25; /* sits left of the ✕ */
   cursor: grab; user-select: none;
   color: var(--text-dim); font-size: 10px; line-height: 1; letter-spacing: .04em;
   padding: 3px 8px; border-radius: 6px;
@@ -164,6 +192,19 @@ body {
 .pane-grip:hover { opacity: 1; color: var(--text); background: var(--bg-elev); }
 .pane-grip:active { cursor: grabbing; }
 .term-pane:not(.multi) .pane-grip { display: none; }  /* single pane → no grip */
+
+/* one-click close ✕ on split panes (top-right, only when split) */
+.pane-close {
+  position: absolute; top: 4px; right: 8px; z-index: 26;
+  width: 24px; height: 22px; border-radius: 6px;
+  background: var(--bg-panel); border: 1px solid var(--border);
+  color: var(--text-dim); cursor: pointer; font-size: 11px; line-height: 1;
+  opacity: 0; transition: opacity 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+.term-pane.multi .pane-close { opacity: .5; }
+.term-pane.multi:hover .pane-close { opacity: .9; }
+.pane-close:hover { opacity: 1; color: var(--error); border-color: var(--error); }
+.term-pane:not(.multi) .pane-close { display: none; } /* single pane → close the tab instead */
 .term-pane.drag-src { opacity: .6; }
 .term-pane.drag-over { box-shadow: inset 0 0 0 2px var(--accent-2); }
 body.pane-dragging { cursor: grabbing !important; }
@@ -293,14 +334,24 @@ body.pane-dragging .term-pane, body.pane-dragging .xterm { user-select: none !im
 
 .vault-list { margin-top: 8px; display: flex; flex-direction: column; gap: 5px; overflow-y: auto; flex: 1 1 auto; min-height: 0; }
 .vault-row {
-  padding: 8px 10px;
+  position: relative;
+  padding: 9px 12px;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: 11px;
   background: var(--bg-panel);
   cursor: pointer;
-  transition: border-color 100ms ease, background 100ms ease;
+  transition: border-color 120ms ease, background 120ms ease, box-shadow 120ms ease;
 }
-.vault-row:hover { background: var(--bg-elev); border-color: var(--accent); }
+.vault-row:hover { background: var(--bg-elev); border-color: var(--accent); box-shadow: 0 3px 12px rgba(0,0,0,.18); }
+/* drag-to-reorder: dim the dragged row; a horizontal bar marks the drop slot */
+.vault-row.row-dragging { opacity: .4; }
+.vault-row.row-drop-before::before,
+.vault-row.row-drop-after::after {
+  content: ""; position: absolute; left: 4px; right: 4px; height: 2.5px;
+  background: var(--accent-2); border-radius: 2px; z-index: 2;
+}
+.vault-row.row-drop-before::before { top: -4px; }
+.vault-row.row-drop-after::after { bottom: -4px; }
 .vault-title { font-size: 12.5px; color: var(--text); }
 .vault-meta { font-size: 10px; color: var(--text-dim); margin-top: 3px; }
 
@@ -429,12 +480,12 @@ body.filepanel-resizing { cursor: col-resize !important; user-select: none; }
   color: var(--text);
   cursor: pointer;
 }
-.ctx-item:hover { background: var(--accent); color: #04171a; }
+.ctx-item:hover { background: var(--accent); color: var(--on-accent); }
 .ctx-item .k { margin-left: auto; font-family: var(--font-mono); font-size: 10px; opacity: .6; }
 .ctx-item.disabled { opacity: .4; pointer-events: none; }
 .ctx-sep { height: 1px; background: var(--border); margin: 4px 6px; }
 .ctx-glyph { width: 16px; text-align: center; color: var(--accent-2); }
-.ctx-item:hover .ctx-glyph { color: #04171a; }
+.ctx-item:hover .ctx-glyph { color: var(--on-accent); }
 
 @keyframes rise { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
 
@@ -493,7 +544,7 @@ body.filepanel-resizing { cursor: col-resize !important; user-select: none; }
   line-height: 1.5;
 }
 .compose-actions { display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap; }
-.accent-btn { background: var(--accent); color: #04171a; border-color: transparent; font-weight: 600; }
+.accent-btn { background: var(--accent); color: var(--on-accent); border-color: transparent; font-weight: 600; }
 .accent-btn:hover { filter: brightness(1.08); border-color: transparent; }
 
 /* small per-row icon buttons (✎ load, ⚡ base, ✕ delete) */
@@ -536,7 +587,9 @@ body.filepanel-resizing { cursor: col-resize !important; user-select: none; }
 .peek-body { padding: 14px 16px; overflow-y: auto; white-space: pre-wrap; font-family: var(--font-mono); font-size: 12px; line-height: 1.55; color: var(--text); }
 
 /* thin top drag strip (replaces the app bar; clears macOS traffic lights) */
-.dragstrip { height: 26px; flex: 0 0 26px; background: var(--bg-base); }
+/* top strip that holds the macOS overlay traffic lights + drags the window;
+   the tab bar sits on its own full row below it */
+.dragstrip { height: 30px; flex: 0 0 30px; background: var(--bg-panel); border-bottom: 1px solid var(--border); }
 
 /* panel controls moved into the tab row */
 .tabs-spacer { flex: 1; }
@@ -568,24 +621,43 @@ body.filepanel-resizing { cursor: col-resize !important; user-select: none; }
 
 /* top session tab bar (also clears macOS traffic lights) */
 .appbar {
-  height: 30px; flex: 0 0 30px;
+  height: 40px; flex: 0 0 40px;   /* tall enough for Tahoe's overlay traffic lights */
   display: flex; align-items: center; gap: 6px;
-  padding: 0 8px 0 78px; /* left gap is the macOS traffic-light zone — required */
+  padding: 0 8px 0 82px;          /* left gap = the traffic-light zone; tabs sit to its right */
   background: var(--bg-panel); border-bottom: 1px solid var(--border);
   user-select: none;
 }
-.term-tabs { display: flex; gap: 4px; flex: 1; overflow-x: auto; height: 100%; align-items: center; }
+.term-tabs { display: flex; gap: 4px; flex: 1 1 auto; overflow: hidden; height: 100%; align-items: stretch; min-width: 0; }
+/* window-move handle filling the space after the tabs + ＋ button (so ＋ stays
+   right after the last tab); tabs sit outside it, so tab-drag reorders */
+.appbar-drag { flex: 1 1 auto; align-self: stretch; min-width: 40px; }
+.tab-add { flex: 0 0 auto; }
+.cwd-label { margin-left: 4px; }
 .term-tabs::-webkit-scrollbar { height: 0; display: none; }
 /* minimal tabs: no borders, subtle active pill, close on hover */
 .term-tab {
+  position: relative;
   display: flex; align-items: center; gap: 7px;
-  padding: 5px 10px; border-radius: 7px; border: none;
+  margin: 4px 0; /* small top/bottom gap; tab fills the rest of the bar height */
+  padding: 5px 10px; border-radius: 9px; border: 1px solid transparent;
   font-size: 12.5px; color: var(--text-dim); cursor: pointer;
   white-space: nowrap; background: transparent;
+  transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
 }
 .term-tab:hover { color: var(--text); background: var(--bg-elev); }
-/* active tab: subtle filled pill + accent-colored name (no lines/arcs) */
-.term-tab.active { background: var(--bg-elev); }
+/* active tab: soft filled pill w/ hairline ring + accent-colored name */
+.term-tab.active { background: var(--bg-elev); border-color: var(--border); box-shadow: 0 1px 4px rgba(0,0,0,.18); }
+/* drag-to-reorder feedback: dim the dragged tab; a straight vertical bar in the
+   gap marks the drop slot (no curved edge highlight hugging the pill) */
+.term-tab { user-select: none; }
+.term-tab.dragging { opacity: .35; }
+.term-tab.drop-before::before,
+.term-tab.drop-after::after {
+  content: ""; position: absolute; top: 5px; bottom: 5px; width: 2.5px;
+  background: var(--accent-2); border-radius: 2px; z-index: 2;
+}
+.term-tab.drop-before::before { left: -3px; }
+.term-tab.drop-after::after { right: -3px; }
 .term-tab.active .term-tab-name { color: var(--accent); font-weight: 600; }
 .term-tab-close { background: none; border: none; color: var(--text-dim); cursor: pointer; font-size: 11px; padding: 0 2px; opacity: 0; transition: opacity 100ms; }
 .term-tab:hover .term-tab-close, .term-tab.active .term-tab-close { opacity: .5; }
@@ -637,7 +709,10 @@ body.filepanel-resizing { cursor: col-resize !important; user-select: none; }
 .term-pane { flex: 1 1 auto; width: 100%; }
 
 /* flex-fill: wide when few tabs, auto-shrink as more are added */
-.term-tab { flex: 1 1 0; min-width: 80px; max-width: 240px; padding: 3px 10px; gap: 7px; justify-content: space-between; }
+/* tabs share equally (basis:0 → equal widths), each capped at 25vw. High grow
+   weight so the drag filler only takes leftover after tabs — tabs shrink below
+   25vw ONLY when there are too many to fit (no scroll, no premature shrink) */
+.term-tab { flex: 100 1 0; max-width: 25vw; min-width: 60px; padding: 3px 10px; gap: 7px; justify-content: space-between; }
 .term-tab-name { flex: 1; overflow: hidden; text-overflow: ellipsis; }
 .term-tab-pin { font-size: 7px; flex: 0 0 auto; color: var(--accent); }
 .term-tab-dot { width: 6px; height: 6px; border-radius: 50%; flex: 0 0 auto; }
@@ -688,7 +763,7 @@ body.filepanel-resizing { cursor: col-resize !important; user-select: none; }
 .group-chips::-webkit-scrollbar { height: 0; display: none; }
 .gchip { flex: 0 0 auto; background: var(--bg-panel); border: 1px solid var(--border); color: var(--text-dim); border-radius: 999px; padding: 4px 12px; font-size: 12px; cursor: pointer; white-space: nowrap; }
 .gchip:hover { color: var(--text); border-color: var(--text-dim); }
-.gchip.active { background: var(--accent); color: #04171a; border-color: transparent; font-weight: 600; }
+.gchip.active { background: var(--accent); color: var(--on-accent); border-color: transparent; font-weight: 600; }
 .gchip-input { flex: 0 0 auto; width: 84px; background: var(--bg-base); border: 1px solid var(--border); color: var(--text); border-radius: 999px; padding: 4px 10px; font-size: 12px; outline: none; transition: width 120ms; }
 .gchip-input:focus { border-color: var(--accent); width: 120px; }
 .ctx-label { font-size: 10px; text-transform: uppercase; letter-spacing: .05em; color: var(--text-dim); padding: 6px 10px 2px; }
@@ -710,7 +785,7 @@ body.filepanel-resizing { cursor: col-resize !important; user-select: none; }
 
 /* minimal hidden-toggle chip (only in All view) */
 .gchip-ghost { background: transparent; border-style: dashed; opacity: .8; }
-.gchip-ghost.active { background: var(--accent); color: #04171a; border-style: solid; opacity: 1; }
+.gchip-ghost.active { background: var(--accent); color: var(--on-accent); border-style: solid; opacity: 1; }
 
 /* anchored confirm popover (near the button, not a centered modal) */
 .confirm-anchored { background: transparent; justify-content: flex-start; align-items: flex-start; }

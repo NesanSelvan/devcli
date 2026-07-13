@@ -1,7 +1,7 @@
 # DevCLI — Rust core (Tauri v2). Real PTY + shell + Claude Code prompt vault.
 [package]
 name = "devcli"
-version = "0.3.2"
+version = "0.3.3"
 edition = "2021"
 description = "Local-first terminal for Claude Code vibe coders"
 
@@ -19,6 +19,7 @@ serde_json = "1"
 
 # terminal: real PTY hosting a real shell
 portable-pty = "0.8"
+base64 = "0.22" # encode coalesced PTY bytes for the JSON event bridge
 
 # session: tail ~/.claude/projects/**/*.jsonl
 notify = "6"

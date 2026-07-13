@@ -25,6 +25,33 @@ const hhmm = (ts) => {
   const d = new Date(ts);
   return isNaN(d) ? "" : d.toTimeString().slice(0, 5);
 };
+// decode a base64 pty-data payload into raw bytes for term.write (xterm decodes
+// the UTF-8 itself, so binary/multibyte output survives chunk boundaries)
+function b64ToBytes(b64) {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes;
+}
+// Copy the selection as a visual grid: one line per on-screen row with a real
+// newline between them. xterm's getSelection() joins rows it thinks are "wrapped"
+// (any row that fills the last column — which box-drawing tables always do),
+// collapsing the columns into interleaved garbage. Reading the buffer row-by-row
+// keeps the table aligned when pasted.
+function selectionGrid(term) {
+  const r = term.getSelectionPosition?.();
+  if (!r) { const s = term.getSelection(); return s && s.length ? s : ""; }
+  const buf = term.buffer.active;
+  const rows = [];
+  for (let y = r.start.y; y <= r.end.y; y++) {
+    const line = buf.getLine(y);
+    if (!line) continue;
+    const startX = y === r.start.y ? r.start.x : 0;
+    const endX = y === r.end.y ? r.end.x : undefined; // undefined → to end of row
+    rows.push(line.translateToString(true, startX, endX));
+  }
+  return rows.join("\n");
+}
 // grow a textarea to fit its content, up to a max, then scroll
 function autoGrow(ta, max = 260) {
   if (!ta) return;
@@ -47,13 +74,16 @@ function status(msg, sticky) {
 // ---------- theme ----------
 const TERM_THEME_DARK = {
   background: "#0D1117", foreground: "#E6EDF3", cursor: "#2DD4BF", cursorAccent: "#0D1117",
-  selectionBackground: "#264F78", black: "#161B22", brightBlack: "#8B949E", red: "#F85149",
+  // clear, uniform selection: a solid blue with forced white text so any coloured
+  // token stays readable when highlighted (was a muted blue with mixed text colours)
+  selectionBackground: "#3563A9", selectionForeground: "#FFFFFF", selectionInactiveBackground: "#2A3D5A",
+  black: "#161B22", brightBlack: "#8B949E", red: "#F85149",
   green: "#3FB950", yellow: "#D29922", blue: "#58A6FF", magenta: "#2DD4BF", cyan: "#39C5CF", white: "#E6EDF3",
 };
 // GitHub-light ANSI palette — clean, readable colored output on a white terminal
 const TERM_THEME_LIGHT = {
-  background: "#FFFFFF", foreground: "#24292F", cursor: "#6B7280", cursorAccent: "#FFFFFF",
-  selectionBackground: "#B6D6FB",
+  background: "#FFFFFF", foreground: "#24292F", cursor: "#2563EB", cursorAccent: "#FFFFFF",
+  selectionBackground: "#AACDF7", selectionForeground: "#0A2540", selectionInactiveBackground: "#D6E4F7",
   black: "#24292F", brightBlack: "#6E7781",
   red: "#CF222E", brightRed: "#A40E26",
   green: "#116329", brightGreen: "#1A7F37",
@@ -70,7 +100,12 @@ function setTheme(name) {
   document.documentElement.setAttribute("data-theme", name);
   localStorage.setItem("devcli-theme", name);
   $("#btn-theme").textContent = name === "light" ? "☀" : "☾";
-  for (const p of panes.values()) p.term.options.theme = termTheme();
+  for (const p of panes.values()) {
+    p.term.options.theme = termTheme();
+    // light bg: force a floor on fg/bg contrast so Claude's dim text (tuned for
+    // dark terminals) stays readable on white; dark theme is already high-contrast
+    p.term.options.minimumContrastRatio = name === "light" ? 4.5 : 1;
+  }
 }
 
 // ---------- terminals: tabs of split-panes ----------
@@ -120,6 +155,7 @@ function makeTerm() {
     allowProposedApi: true,
     smoothScrollDuration: 0, scrollSensitivity: 3, // snap to whole rows — sub-pixel smooth scroll jags box-drawing lines (│) in tables
     scrollback: 100000, // keep the whole session scrollable (default was 1000)
+    minimumContrastRatio: currentTheme === "light" ? 4.5 : 1, // keep dim text readable on white
     theme: termTheme(),
   });
 }
@@ -179,10 +215,30 @@ function markActiveLeaf() {
   }
 }
 
-// top bar: one tab per terminal — rename, pin, color, close
+// reorder the tabs Map so `draggedId` lands before/after `targetId`
+function reorderTabs(draggedId, targetId, before) {
+  if (draggedId === targetId) return;
+  const ids = [...tabs.keys()];
+  const from = ids.indexOf(draggedId);
+  if (from < 0) return;
+  ids.splice(from, 1);
+  let to = ids.indexOf(targetId);
+  if (to < 0) return;
+  if (!before) to += 1;
+  ids.splice(to, 0, draggedId);
+  const entries = ids.map((id) => [id, tabs.get(id)]);
+  tabs.clear();
+  for (const [id, t] of entries) tabs.set(id, t);
+  renderTermTabs();
+  saveLayout(); // persist the new order now (not debounced) so it survives a quick quit
+}
+// top bar: one tab per terminal — rename, pin, color, close, drag-to-reorder
 function renderTermTabs() {
   const bar = $("#term-tabs");
   if (!bar) return;
+  // grab ＋ and the drag filler BEFORE clearing — they live inside the row now,
+  // so innerHTML="" would destroy them (holding refs keeps the elements alive)
+  const addBtn = $("#tab-add"), dragFill = $("#appbar-drag");
   bar.innerHTML = "";
   for (const p of orderedTabs()) {
     const nLeaves = tabLeafIds(p).length;
@@ -195,12 +251,61 @@ function renderTermTabs() {
     name.addEventListener("dblclick", (e) => { e.stopPropagation(); renameTab(p, name); });
     tab.appendChild(name);
     const x = el("button", "term-tab-close", "✕");
-    x.addEventListener("click", (e) => { e.stopPropagation(); closeTab(p.id); });
+    x.addEventListener("mousedown", (e) => { e.stopPropagation(); e.preventDefault(); closeTab(p.id); });
+    x.addEventListener("click", (e) => { e.stopPropagation(); });
     tab.appendChild(x);
-    tab.addEventListener("click", () => { activeTab = p.id; showActive(); });
+    tab.addEventListener("click", () => { if (!tabDragMoved) { activeTab = p.id; showActive(); } });
     tab.addEventListener("contextmenu", (e) => { e.preventDefault(); openTabMenu(e.clientX, e.clientY, p.id); });
+    // pointer-based drag-to-reorder (HTML5 DnD loses to the window drag-region;
+    // stopPropagation on mousedown keeps Tauri from grabbing the window instead)
+    tab.addEventListener("mousedown", (e) => {
+      if (e.button !== 0 || e.target === x) return;
+      e.stopPropagation();
+      e.preventDefault(); // don't let the drag text-select the tab label
+      startTabDrag(p.id, e);
+    });
     bar.appendChild(tab);
   }
+  // keep ＋ right after the last tab, then the draggable filler — both live
+  // inside the tab row so the ＋ never floats off in empty space
+  if (addBtn) bar.appendChild(addBtn);
+  if (dragFill) bar.appendChild(dragFill);
+}
+let tabDragMoved = false;
+// drag a tab horizontally to reorder; a blue edge marks the drop slot
+function startTabDrag(id, e0) {
+  const bar = $("#term-tabs");
+  const startX = e0.clientX;
+  tabDragMoved = false;
+  const clear = () => bar.querySelectorAll(".drop-before,.drop-after").forEach((t) => t.classList.remove("drop-before", "drop-after"));
+  const draggedEl = () => bar.querySelector(`.term-tab[data-id="${id}"]`);
+  const onMove = (e) => {
+    if (!tabDragMoved && Math.abs(e.clientX - startX) < 5) return;
+    tabDragMoved = true;
+    draggedEl()?.classList.add("dragging");
+    clear();
+    const over = [...bar.querySelectorAll(".term-tab")].find((t) => {
+      const r = t.getBoundingClientRect();
+      return e.clientX >= r.left && e.clientX <= r.right;
+    });
+    if (over && over.dataset.id !== id) {
+      const r = over.getBoundingClientRect();
+      over.classList.add(e.clientX < r.left + r.width / 2 ? "drop-before" : "drop-after");
+    }
+  };
+  const onUp = () => {
+    window.removeEventListener("mousemove", onMove);
+    window.removeEventListener("mouseup", onUp);
+    draggedEl()?.classList.remove("dragging");
+    if (tabDragMoved) {
+      const target = bar.querySelector(".drop-before, .drop-after");
+      if (target) reorderTabs(id, target.dataset.id, target.classList.contains("drop-before"));
+      clear();
+    }
+    setTimeout(() => { tabDragMoved = false; }, 0); // let click read it, then reset
+  };
+  window.addEventListener("mousemove", onMove);
+  window.addEventListener("mouseup", onUp);
 }
 function renameTab(pane, nameEl) {
   const inp = el("input", "term-tab-input");
@@ -268,6 +373,13 @@ function createLeafPane(tabId, cwd) {
   } catch (_) { /* canvas fallback */ }
   fit.fit();
 
+  // Force a full repaint on every scroll. WKWebView's WebGL renderer only
+  // repaints the rows it thinks changed when the viewport scrolls, so the rest
+  // keep stale glyph fragments — box-drawing borders (│) break into segments and
+  // ghost characters bleed between rows. A fresh render is always clean, so
+  // marking every visible row dirty on scroll reproduces that clean frame.
+  term.onScroll(() => term.refresh(0, term.rows - 1));
+
   // At a plain shell prompt (normal buffer) scroll the local scrollback and
   // swallow the wheel — otherwise a TUI that left mouse-tracking on makes the
   // trackpad leak raw SGR mouse codes (<65;..M) into the shell as garbage.
@@ -284,8 +396,8 @@ function createLeafPane(tabId, cwd) {
 
   // copy-on-select — highlighting text puts it on the clipboard (iTerm/Warp behaviour)
   term.onSelectionChange(() => {
-    const sel = term.getSelection();
-    if (sel && sel.length) navigator.clipboard?.writeText(sel).catch(() => {});
+    const sel = selectionGrid(term);
+    if (sel) navigator.clipboard?.writeText(sel).catch(() => {});
   });
 
   term.onData((data) => {
@@ -309,6 +421,23 @@ function createLeafPane(tabId, cwd) {
   grip.title = "drag onto another pane to swap positions";
   grip.addEventListener("mousedown", (e) => { e.preventDefault(); e.stopPropagation(); startPaneDrag(id, wrap, e); });
   wrap.appendChild(grip);
+
+  // one-click close ✕ on split panes (shown only when the tab is split, like the grip).
+  // Act on mousedown, not click — WKWebView sometimes drops the first click here.
+  const closeBtn = el("button", "pane-close", "✕");
+  closeBtn.title = "Close pane (⌘W)";
+  closeBtn.addEventListener("mousedown", (e) => { e.preventDefault(); e.stopPropagation(); closeLeaf(id); });
+  closeBtn.addEventListener("click", (e) => { e.preventDefault(); e.stopPropagation(); });
+  wrap.appendChild(closeBtn);
+
+  // refit when the pane actually gets a new size — covers window minimize→restore,
+  // maximize, and split-resize, which don't always emit a usable 'resize' event.
+  const ro = new ResizeObserver(() => {
+    if (!wrap.clientWidth || !wrap.clientHeight) return;
+    try { fit.fit(); invoke("pty_resize", { id, rows: term.rows, cols: term.cols }); } catch (_) {}
+  });
+  ro.observe(wrap);
+  pane.ro = ro;
 
   invoke("pty_spawn", { id, rows: term.rows, cols: term.cols, cwd: cwd || null });
   return pane;
@@ -439,14 +568,33 @@ function splitLeaf(paneId, dir) {
   np.term.focus();
   scheduleSave();
 }
+// warn before killing a running Claude session or command; returns false to abort
+async function confirmCloseIfBusy(paneIds, what) {
+  let claude = false, task = false;
+  await Promise.all(paneIds.map(async (id) => {
+    if (await invoke("pty_has_claude", { id }).catch(() => false)) claude = true;
+    else if (await invoke("pty_busy", { id }).catch(() => false)) task = true;
+  }));
+  if (!claude && !task) return true;
+  const detail = claude
+    ? "A Claude session is running here — closing will end it."
+    : "A command is still running here — closing will stop it.";
+  return confirmDialog(`Close ${what}?`, detail, "Close");
+}
+
 // close one leaf; the last leaf of a tab closes the whole tab
-function closeLeaf(paneId) {
+async function closeLeaf(paneId) {
   const pane = panes.get(paneId);
   if (!pane) return;
   const tab = tabs.get(pane.tabId);
   if (tabLeafIds(tab).length <= 1) { closeTab(tab.id); return; }
+  if (!(await confirmCloseIfBusy([paneId], "this pane"))) return;
+  if (!panes.get(paneId)) return; // bailed out / already gone while confirming
   invoke("pty_close", { id: paneId });
-  pane.term.dispose();
+  // guard teardown — a throw here (WebGL dispose can, in WKWebView) must NOT
+  // abort the collapse below, else the pane's shell dies but the split stays
+  try { pane.ro?.disconnect(); } catch (_) {}
+  try { pane.term.dispose(); } catch (_) {}
   pane.el.remove();
   panes.delete(paneId);
   tab.root = removeLeaf(tab.root, paneId);
@@ -637,14 +785,16 @@ function newTab() {
   showActive();
   scheduleSave();
 }
-function closeTab(id) {
+async function closeTab(id) {
   if (tabs.size <= 1) return; // keep at least one terminal
   const tab = tabs.get(id);
   if (!tab) return;
+  if (!(await confirmCloseIfBusy(tabLeafIds(tab), "this terminal"))) return;
+  if (!tabs.get(id)) return; // gone while confirming
   for (const pid of tabLeafIds(tab)) {
     invoke("pty_close", { id: pid });
     const p = panes.get(pid);
-    if (p) { p.term.dispose(); panes.delete(pid); }
+    if (p) { try { p.ro?.disconnect(); p.term.dispose(); } catch (_) {} panes.delete(pid); }
   }
   tab.el.remove();
   tabs.delete(id);
@@ -826,7 +976,6 @@ function appendEvent(ev) {
   pane.appendChild(node);
   pane.scrollTop = pane.scrollHeight;
 }
-
 // ---------- prompts ----------
 const scopeBadge = (scope) => el("span", `badge badge-${scope}`, scope === "global" ? "global" : "folder");
 // swap a label span for an inline text input; commit on Enter/blur, cancel on Esc
@@ -1099,6 +1248,63 @@ function openAddItems(x, y, kind, group, entries) {
   menu.style.top = Math.min(y, window.innerHeight - mh - 8) + "px";
 }
 
+// drag-to-reorder for panel lists — a per-kind custom order kept in localStorage,
+// so you can pull favourite prompts/agents/skills to the top and they stay.
+// Pointer-based (WKWebView's HTML5 drag-and-drop drop event is unreliable).
+function startRowDrag(kind, shown, id, row, body, e0) {
+  const startY = e0.clientY, startX = e0.clientX;
+  let moved = false;
+  const clear = () => body.querySelectorAll(".row-drop-before,.row-drop-after").forEach((r) => r.classList.remove("row-drop-before", "row-drop-after"));
+  const onMove = (e) => {
+    if (!moved && Math.abs(e.clientY - startY) < 6 && Math.abs(e.clientX - startX) < 6) return;
+    moved = true;
+    document.body.style.userSelect = "none";
+    row.classList.add("row-dragging");
+    clear();
+    const over = document.elementFromPoint(e.clientX, e.clientY)?.closest(".vault-row");
+    if (over && over !== row && body.contains(over)) {
+      const r = over.getBoundingClientRect();
+      over.classList.add(e.clientY < r.top + r.height / 2 ? "row-drop-before" : "row-drop-after");
+    }
+  };
+  const onUp = () => {
+    window.removeEventListener("mousemove", onMove);
+    window.removeEventListener("mouseup", onUp);
+    document.body.style.userSelect = "";
+    row.classList.remove("row-dragging");
+    if (moved) {
+      const target = body.querySelector(".row-drop-before, .row-drop-after");
+      if (target) reorderItem(kind, shown, id, target.dataset.itemId, target.classList.contains("row-drop-before"));
+      clear();
+      // swallow the click that follows a drag (so it doesn't also "insert" the row)
+      const stop = (ev) => { ev.stopPropagation(); ev.preventDefault(); };
+      row.addEventListener("click", stop, { capture: true });
+      setTimeout(() => row.removeEventListener("click", stop, { capture: true }), 300);
+    }
+  };
+  window.addEventListener("mousemove", onMove);
+  window.addEventListener("mouseup", onUp);
+}
+const itemOrderKey = (kind) => `devcli-order-${kind}`;
+function getItemOrder(kind) { try { return JSON.parse(localStorage.getItem(itemOrderKey(kind)) || "[]"); } catch (_) { return []; } }
+function applyItemOrder(kind, entries) {
+  const order = getItemOrder(kind);
+  if (!order.length) return entries;
+  const rank = (id) => { const i = order.indexOf(id); return i < 0 ? order.length + 1 : i; };
+  return [...entries].sort((a, b) => rank(a.id) - rank(b.id)); // stable → unordered keep their place
+}
+function reorderItem(kind, shown, draggedId, targetId, before) {
+  const ids = shown.map((e) => e.id);
+  const from = ids.indexOf(draggedId);
+  if (from < 0) return;
+  ids.splice(from, 1);
+  let to = ids.indexOf(targetId);
+  if (to < 0) return;
+  if (!before) to += 1;
+  ids.splice(to, 0, draggedId);
+  localStorage.setItem(itemOrderKey(kind), JSON.stringify(ids));
+  refreshKind(kind);
+}
 async function renderGrouped(listSel, kind, entries) {
   const groups = await invoke("groups_list", { kind }).catch(() => []);
   const list = $(listSel);
@@ -1164,10 +1370,21 @@ async function renderGrouped(listSel, kind, entries) {
   let shown = entries.filter((e) => hiddenShown[kind] || !e.hidden);
   if (sel === "") shown = shown.filter((e) => !e.group);
   else if (sel !== "__all") shown = shown.filter((e) => e.group === sel);
+  shown = applyItemOrder(kind, shown); // honor the user's drag-to-reorder order
 
   const body = el("div", "grp-items");
   if (!shown.length) body.appendChild(el("div", "empty", "Nothing here — right-click an item to add it to a group."));
-  for (const e of shown) body.appendChild(e.el);
+  for (const e of shown) {
+    const row = e.el;
+    row.dataset.itemId = e.id;
+    // pointer-based drag (WKWebView's HTML5 drop doesn't fire reliably)
+    row.addEventListener("mousedown", (ev) => {
+      if (ev.button !== 0 || ev.target.closest("button,input")) return; // let row buttons work
+      ev.preventDefault(); // stop the drag from text-selecting the row label
+      startRowDrag(kind, shown, e.id, row, body, ev);
+    });
+    body.appendChild(row);
+  }
   list.appendChild(body);
 }
 
@@ -1520,13 +1737,32 @@ function refreshActivePanel() {
 }
 async function syncProjectDir() {
   const cwd = await invoke("pty_cwd", { id: activeId }).catch(() => null);
-  if (!cwd || cwd === currentDir) return;
-  currentDir = cwd;
-  await invoke("set_project_dir", { path: cwd }).catch(() => {});
-  $("#cwd-label").textContent = "📁 " + (cwd.split("/").filter(Boolean).pop() || cwd);
-  $("#cwd-label").title = cwd + " — the panel follows this folder";
-  refreshActivePanel();
-  scheduleSave(); // remember the new folder for session restore
+  if (!cwd) return;
+  if (cwd !== currentDir) {
+    currentDir = cwd;
+    await invoke("set_project_dir", { path: cwd }).catch(() => {});
+    const base = cwd.split("/").filter(Boolean).pop() || cwd;
+    $("#cwd-label").textContent = "📁 " + base;
+    $("#cwd-label").title = cwd + " — the panel follows this folder";
+    $("#sb-folder-name").textContent = base;
+    $("#sb-folder").title = cwd;
+    refreshActivePanel();
+    scheduleSave(); // remember the new folder for session restore
+  }
+  updateContextChips(cwd); // branch + agent can change without a cd — refresh each tick
+}
+
+// bottom Warp-style context bar: git-branch chip + live-agent chip for the active pane
+async function updateContextChips(cwd) {
+  const [branch, claude] = await Promise.all([
+    invoke("git_branch", { path: cwd }).catch(() => null),
+    invoke("pty_has_claude", { id: activeId }).catch(() => false),
+  ]);
+  const branchChip = $("#sb-branch");
+  if (branch) { $("#sb-branch-name").textContent = branch; branchChip.classList.remove("hidden"); }
+  else branchChip.classList.add("hidden");
+  $("#sb-agent-name").textContent = claude ? "claude" : "shell";
+  $("#sb-agent").classList.toggle("live", !!claude);
 }
 
 // ---------- boot ----------
@@ -1534,7 +1770,10 @@ async function init() {
   setTheme(currentTheme);
   checkForUpdates(); // non-blocking; only does anything in a release build
 
-  await listen("pty-data", (e) => panes.get(e.payload.id)?.term.write(new Uint8Array(e.payload.data)));
+  await listen("pty-data", (e) => {
+    const pane = panes.get(e.payload.id);
+    if (pane) pane.term.write(b64ToBytes(e.payload.data));
+  });
   await listen("pty-exit", (e) =>
     panes.get(e.payload.id)?.term.write("\r\n\x1b[38;5;244m[process exited]\x1b[0m\r\n"));
 

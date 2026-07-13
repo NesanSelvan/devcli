@@ -8,8 +8,11 @@ mod vault;
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::PathBuf;
+use std::sync::mpsc;
 use std::sync::Mutex;
 use std::thread;
+
+use base64::Engine;
 
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use serde::Serialize;
@@ -94,7 +97,7 @@ impl AppState {
 #[derive(Clone, Serialize)]
 struct PtyChunk {
     id: String,
-    data: Vec<u8>,
+    data: String, // base64 of the coalesced PTY bytes
 }
 #[derive(Clone, Serialize)]
 struct PtyId {
@@ -131,15 +134,42 @@ fn pty_spawn(app: AppHandle, state: State<'_, AppState>, id: String, rows: u16, 
         .unwrap()
         .insert(id.clone(), Pty { master: pair.master, writer, child_pid });
 
+    // Reader thread: pull raw bytes off the PTY and hand each chunk to the
+    // emitter. Reading and emitting are split so a slow IPC hop never stalls the
+    // read — bursts pile up in the channel and get coalesced below.
+    let (tx, rx) = mpsc::channel::<Vec<u8>>();
     thread::spawn(move || {
         let mut buf = [0u8; 8192];
         loop {
             match reader.read(&mut buf) {
-                Ok(0) | Err(_) => break,
+                Ok(0) | Err(_) => break, // EOF / shell hung up
                 Ok(n) => {
-                    let _ = app.emit("pty-data", PtyChunk { id: id.clone(), data: buf[..n].to_vec() });
+                    if tx.send(buf[..n].to_vec()).is_err() {
+                        break; // emitter gone
+                    }
                 }
             }
+        }
+        // dropping tx closes the channel → emitter drains + exits
+    });
+
+    // Emitter thread: coalesce a burst of reads into ONE event. recv() blocks for
+    // the first chunk (idle = immediate, low latency); try_recv() then drains
+    // whatever else queued while the last emit was in flight (flood = batched),
+    // capped so one event never gets unboundedly large. Payload is base64 — a
+    // Vec<u8> over Tauri's JSON bridge bloats to a number-array (~4-6× the bytes).
+    const COALESCE_CAP: usize = 256 * 1024;
+    thread::spawn(move || {
+        while let Ok(first) = rx.recv() {
+            let mut batch = first;
+            while batch.len() < COALESCE_CAP {
+                match rx.try_recv() {
+                    Ok(more) => batch.extend_from_slice(&more),
+                    Err(_) => break,
+                }
+            }
+            let data = base64::engine::general_purpose::STANDARD.encode(&batch);
+            let _ = app.emit("pty-data", PtyChunk { id: id.clone(), data });
         }
         let _ = child.wait();
         let _ = app.emit("pty-exit", PtyId { id: id.clone() });
@@ -242,6 +272,41 @@ fn pty_has_claude(state: State<'_, AppState>, id: String) -> bool {
         Some(pid) => has_claude_descendant(pid),
         None => false,
     }
+}
+
+/// True if the shell has a foreground child process — i.e. a command is running
+/// (at an idle prompt zsh/bash have no children). Used to warn before closing.
+fn has_child_process(root: u32) -> bool {
+    let out = match std::process::Command::new("ps").args(["-Ao", "ppid="]).output() {
+        Ok(o) => o,
+        Err(_) => return false,
+    };
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .any(|l| l.trim().parse::<u32>() == Ok(root))
+}
+
+#[tauri::command]
+fn pty_busy(state: State<'_, AppState>, id: String) -> bool {
+    match state.ptys.lock().unwrap().get(&id).and_then(|p| p.child_pid) {
+        Some(pid) => has_child_process(pid),
+        None => false,
+    }
+}
+
+/// Current git branch for a folder (drives the terminal's context-chip bar).
+/// None when the folder isn't a repo or git is unavailable.
+#[tauri::command]
+fn git_branch(path: String) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .args(["-C", &path, "rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let b = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if b.is_empty() { None } else { Some(b) }
 }
 
 /// Re-scope the panel (prompts/notes/agents/skills/mcp) to a folder.
@@ -651,6 +716,8 @@ fn main() {
             pty_close,
             pty_cwd,
             pty_has_claude,
+            pty_busy,
+            git_branch,
             set_project_dir,
             prompts_search,
             prompts_get,
