@@ -434,11 +434,23 @@ fn read_doc(path: String) -> Result<String, String> {
     std::fs::read_to_string(&path).map_err(|e| e.to_string())
 }
 
+/// Expand a leading `~` / `~/` to the user's home dir. Shells print home-relative
+/// paths constantly; without this they resolve to a bogus absolute path.
+fn expand_home(path: &str) -> std::path::PathBuf {
+    if path == "~" || path.starts_with("~/") {
+        if let Ok(home) = std::env::var("HOME") {
+            let rest = path.trim_start_matches('~').trim_start_matches('/');
+            return std::path::Path::new(&home).join(rest);
+        }
+    }
+    std::path::PathBuf::from(path)
+}
+
 /// Read a text file for the side-panel preview. Relative paths resolve against
 /// the active project dir. Rejects oversized / binary files.
 #[tauri::command]
 fn read_file(state: State<'_, AppState>, path: String) -> Result<String, String> {
-    let pb = std::path::PathBuf::from(&path);
+    let pb = expand_home(&path);
     let full = if pb.is_absolute() { pb } else { state.dir().join(pb) };
     let meta = std::fs::metadata(&full).map_err(|e| e.to_string())?;
     if !meta.is_file() {
@@ -466,7 +478,7 @@ fn open_external(url: String) -> Result<(), String> {
 /// against the active project dir (same rule as read_file).
 #[tauri::command]
 fn reveal_file(state: State<'_, AppState>, path: String) -> Result<(), String> {
-    let pb = std::path::PathBuf::from(&path);
+    let pb = expand_home(&path);
     let full = if pb.is_absolute() { pb } else { state.dir().join(pb) };
     if !full.exists() {
         return Err(format!("not found: {}", full.display()));

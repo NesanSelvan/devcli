@@ -52,6 +52,37 @@ function selectionGrid(term) {
   }
   return rows.join("\n");
 }
+// Put text on the clipboard reliably. WKWebView's async clipboard API rejects
+// when the call isn't tied to a user gesture (copy-on-select fires mid-drag),
+// and the old code swallowed that — leaving the clipboard stale, so paste
+// returned nothing or old content. Fall back to a hidden-textarea execCommand
+// copy, which works from any context.
+async function copyText(text) {
+  if (!text) return false;
+  try { await navigator.clipboard.writeText(text); return true; } catch (_) { /* gesture-gated; fall back */ }
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.cssText = "position:fixed;top:0;left:0;opacity:0;pointer-events:none";
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand("copy");
+    ta.remove();
+    return ok;
+  } catch (_) { return false; }
+}
+// Coalesce WKWebView-WebGL full repaints to one per animation frame per term.
+// Scroll and streaming output both fire in bursts; repainting the whole grid on
+// every event is what made scrolling and heavy output feel janky. One clean
+// frame per rAF is enough to clear WebGL's stale-cell ghosting, and cheap.
+function scheduleRefresh(term) {
+  if (term._refreshQueued) return;
+  term._refreshQueued = true;
+  requestAnimationFrame(() => {
+    term._refreshQueued = false;
+    try { term.refresh(0, term.rows - 1); } catch (_) {}
+  });
+}
 // grow a textarea to fit its content, up to a max, then scroll
 function autoGrow(ta, max = 260) {
   if (!ta) return;
@@ -151,7 +182,7 @@ function makeTerm() {
     cursorBlink: true, cursorStyle: "bar", cursorInactiveStyle: "outline", cursorWidth: 2,
     allowProposedApi: true,
     smoothScrollDuration: 0, scrollSensitivity: 3, // snap to whole rows — sub-pixel smooth scroll jags box-drawing lines (│) in tables
-    scrollback: 100000, // keep the whole session scrollable (default was 1000)
+    scrollback: 20000, // deep, but 100k made resize/reflow and memory heavy (default was 1000)
     minimumContrastRatio: currentTheme === "light" ? 4.5 : 1, // keep dim text readable on white
     theme: termTheme(),
   });
@@ -367,7 +398,7 @@ async function adoptClaudeTitle(pane, raw) {
 
 // match file paths / filenames in terminal output (e.g. dummy.txt, src/main.rs,
 // ./x.js:12). Requires a "." + 2–8 char extension so prose like "e.g" is ignored.
-const FILE_PATH_RE = /(?:\.{0,2}\/)?[\w@.+\-]+(?:\/[\w@.+\-]+)*\.[A-Za-z][A-Za-z0-9]{1,7}(?::\d+)?/g;
+const FILE_PATH_RE = /(?:~\/|\.{0,2}\/)?[\w@.+\-]+(?:\/[\w@.+\-]+)*\.[A-Za-z][A-Za-z0-9]{1,7}(?::\d+)?/g;
 function registerFilePathLinks(term, paneId) {
   term.registerLinkProvider({
     provideLinks(y, callback) {
@@ -417,12 +448,22 @@ function createLeafPane(tabId, cwd) {
   } catch (_) { /* canvas fallback */ }
   fit.fit();
 
-  // Force a full repaint on every scroll. WKWebView's WebGL renderer only
-  // repaints the rows it thinks changed when the viewport scrolls, so the rest
-  // keep stale glyph fragments — box-drawing borders (│) break into segments and
-  // ghost characters bleed between rows. A fresh render is always clean, so
-  // marking every visible row dirty on scroll reproduces that clean frame.
-  term.onScroll(() => term.refresh(0, term.rows - 1));
+  // Shift+Enter → insert a newline instead of submitting. xterm sends a plain
+  // CR for Enter no matter the modifiers, so Claude Code (and most REPLs) can't
+  // tell Shift+Enter from Enter. Emit ESC+CR — the exact sequence Claude's
+  // `/terminal-setup` binds — which Claude reads as "newline", not send.
+  term.attachCustomKeyEventHandler((e) => {
+    if (e.type === "keydown" && e.key === "Enter" && e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) {
+      invoke("pty_write", { id, data: "\x1b\r" });
+      return false; // stop xterm from also sending a plain CR
+    }
+    return true;
+  });
+
+  // Full repaint on scroll to clear WKWebView-WebGL stale-cell ghosting (box
+  // borders │ break into segments, glyphs bleed between rows). Coalesced to one
+  // repaint per frame — scroll fires in bursts, so per-event refresh was jank.
+  term.onScroll(() => scheduleRefresh(term));
 
   // At a plain shell prompt (normal buffer) scroll the local scrollback and
   // swallow the wheel — otherwise a TUI that left mouse-tracking on makes the
@@ -445,7 +486,7 @@ function createLeafPane(tabId, cwd) {
   // copy-on-select — highlighting text puts it on the clipboard (iTerm/Warp behaviour)
   term.onSelectionChange(() => {
     const sel = selectionGrid(term);
-    if (sel) navigator.clipboard?.writeText(sel).catch(() => {});
+    if (sel) copyText(sel);
   });
 
   term.onData((data) => {
@@ -1622,8 +1663,7 @@ function wireFilePanel() {
     if (p) invoke("reveal_file", { path: p }).catch((e) => status("⚠ " + e));
   });
   $("#file-panel-copy")?.addEventListener("click", async () => {
-    try { await navigator.clipboard.writeText(filePanelRaw); status("copied file contents"); }
-    catch { status("⚠ copy failed"); }
+    status(await copyText(filePanelRaw) ? "copied file contents" : "⚠ copy failed");
   });
   // restore saved width
   const saved = parseInt(localStorage.getItem("devcli-filepanel-width") || "", 10);
@@ -1835,16 +1875,20 @@ function refreshActivePanel() {
   if (which) loadPane(which);
 }
 async function syncProjectDir() {
+  // The interval fires every tick and each run spawns lsof + ps + git. That's
+  // pure waste when the app is backgrounded or unfocused, and it made the whole
+  // thing feel heavy — skip it unless we're actually looking at the window.
+  if (document.hidden || !document.hasFocus()) return;
   const cwd = await invoke("pty_cwd", { id: activeId }).catch(() => null);
   if (!cwd) return;
   const base = cwd.split("/").filter(Boolean).pop() || cwd;
+  // one claude-detect per tick, shared by the tab-name logic and the chips
+  // (was two separate `ps` scans of the whole process table).
+  const claude = await invoke("pty_has_claude", { id: activeId }).catch(() => false);
   // tab name follows the active folder — unless hand-renamed, or a Claude session
   // is running (then adoptClaudeTitle owns the name and we leave it alone)
   const at = tabs.get(activeTab);
-  if (at && at.autoNamed !== false) {
-    const claude = await invoke("pty_has_claude", { id: activeId }).catch(() => false);
-    if (!claude && at.name !== base) { at.name = base; renderTermTabs(); }
-  }
+  if (at && at.autoNamed !== false && !claude && at.name !== base) { at.name = base; renderTermTabs(); }
   if (cwd !== currentDir) {
     currentDir = cwd;
     await invoke("set_project_dir", { path: cwd }).catch(() => {});
@@ -1855,15 +1899,12 @@ async function syncProjectDir() {
     refreshActivePanel();
     scheduleSave(); // remember the new folder for session restore
   }
-  updateContextChips(cwd); // branch + agent can change without a cd — refresh each tick
+  updateContextChips(cwd, claude); // branch + agent can change without a cd — refresh each tick
 }
 
 // bottom Warp-style context bar: git-branch chip + live-agent chip for the active pane
-async function updateContextChips(cwd) {
-  const [branch, claude] = await Promise.all([
-    invoke("git_branch", { path: cwd }).catch(() => null),
-    invoke("pty_has_claude", { id: activeId }).catch(() => false),
-  ]);
+async function updateContextChips(cwd, claude) {
+  const branch = await invoke("git_branch", { path: cwd }).catch(() => null);
   const branchChip = $("#sb-branch");
   if (branch) { $("#sb-branch-name").textContent = branch; branchChip.classList.remove("hidden"); }
   else branchChip.classList.add("hidden");
@@ -1878,7 +1919,13 @@ async function init() {
 
   await listen("pty-data", (e) => {
     const pane = panes.get(e.payload.id);
-    if (pane) pane.term.write(b64ToBytes(e.payload.data));
+    if (!pane) return;
+    // Same WKWebView WebGL bug the onScroll refresh works around: the renderer
+    // only repaints cells it thinks changed, so a TUI that redraws lines in
+    // place (Claude's live output) leaves stale glyph fragments — box borders
+    // (│) shatter. onScroll doesn't fire for redraw-in-place, so force a clean
+    // frame once the bytes are parsed (coalesced to one repaint per frame).
+    pane.term.write(b64ToBytes(e.payload.data), () => scheduleRefresh(pane.term));
   });
   await listen("pty-exit", (e) =>
     panes.get(e.payload.id)?.term.write("\r\n\x1b[38;5;244m[process exited]\x1b[0m\r\n"));
@@ -1940,7 +1987,14 @@ async function init() {
     const mod = e.metaKey || e.ctrlKey;
     if (!mod) return;
     const k = e.key.toLowerCase();
-    if (k === "t") { e.preventDefault(); newTab(); }
+    if (k === "c") {
+      // ⌘C copies the terminal selection. xterm has no built-in copy binding,
+      // and this keydown IS a user gesture — so the clipboard write is allowed
+      // where copy-on-select can be blocked. No selection → let it fall through.
+      const t = panes.get(activeId)?.term;
+      if (t?.hasSelection()) { e.preventDefault(); copyText(selectionGrid(t)).then((ok) => ok && status("copied")); }
+    }
+    else if (k === "t") { e.preventDefault(); newTab(); }
     else if (k === "e") { e.preventDefault(); enhanceActive(); }
     else if (k === "b") { e.preventDefault(); setPanel($("#panel").classList.contains("hidden")); }
     else if (k === "w") { e.preventDefault(); closeLeaf(activeId); }
@@ -1961,7 +2015,8 @@ async function init() {
 
   panes.get("1").term.focus();
   setTimeout(syncProjectDir, 800);      // initial folder detect
-  setInterval(syncProjectDir, 1500);    // follow `cd` in the active terminal
+  setInterval(syncProjectDir, 2500);    // follow `cd` in the active terminal (gated on focus)
+  window.addEventListener("focus", syncProjectDir); // resync instantly on refocus, don't wait a tick
   window.addEventListener("resize", () => { sizeTabs(); refitAll(); }); // keep 25% tab width on window resize
   sizeTabs();                           // size once the appbar has a real width
 }
