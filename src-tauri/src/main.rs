@@ -122,6 +122,14 @@ fn pty_spawn(app: AppHandle, state: State<'_, AppState>, id: String, rows: u16, 
         .unwrap_or_else(|| state.dir());
     cmd.cwd(start);
     cmd.env("TERM", "xterm-256color");
+    // Advertise Kitty keyboard-protocol support so Claude Code turns it on and
+    // reads Shift+Enter (CSI 13;2u, sent by the frontend) as a newline instead
+    // of submit. Claude's detection skips the KITTY_WINDOW_ID signal when
+    // TERM_PROGRAM names an unknown terminal, so drop any value leaked from the
+    // launch env (Finder/iTerm/VSCode) before advertising.
+    cmd.env_remove("TERM_PROGRAM");
+    cmd.env_remove("TERM_PROGRAM_VERSION");
+    cmd.env("KITTY_WINDOW_ID", "1");
 
     let mut child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
     let child_pid = child.process_id();
@@ -220,10 +228,17 @@ fn shell_cwd(pid: u32) -> Option<String> {
     }
 }
 
+/// Async + off-thread: `lsof` is slow, and a sync command would run it on the
+/// main thread — freezing the UI on every tab switch (syncProjectDir calls this).
 #[tauri::command]
-fn pty_cwd(state: State<'_, AppState>, id: String) -> Option<String> {
-    let pid = state.ptys.lock().unwrap().get(&id).and_then(|p| p.child_pid)?;
-    shell_cwd(pid)
+async fn pty_cwd(state: State<'_, AppState>, id: String) -> Result<Option<String>, String> {
+    let pid = state.ptys.lock().unwrap().get(&id).and_then(|p| p.child_pid);
+    match pid {
+        Some(pid) => tauri::async_runtime::spawn_blocking(move || shell_cwd(pid))
+            .await
+            .map_err(|e| e.to_string()),
+        None => Ok(None),
+    }
 }
 
 /// True if the terminal's shell has a descendant process running Claude Code
@@ -266,11 +281,16 @@ fn has_claude_descendant(root: u32) -> bool {
     false
 }
 
+/// Async + off-thread: scans the whole process table via `ps`; must not block
+/// the main thread (called on every tab switch + on a 2.5s interval).
 #[tauri::command]
-fn pty_has_claude(state: State<'_, AppState>, id: String) -> bool {
-    match state.ptys.lock().unwrap().get(&id).and_then(|p| p.child_pid) {
-        Some(pid) => has_claude_descendant(pid),
-        None => false,
+async fn pty_has_claude(state: State<'_, AppState>, id: String) -> Result<bool, String> {
+    let pid = state.ptys.lock().unwrap().get(&id).and_then(|p| p.child_pid);
+    match pid {
+        Some(pid) => tauri::async_runtime::spawn_blocking(move || has_claude_descendant(pid))
+            .await
+            .map_err(|e| e.to_string()),
+        None => Ok(false),
     }
 }
 
@@ -286,20 +306,23 @@ fn has_child_process(root: u32) -> bool {
         .any(|l| l.trim().parse::<u32>() == Ok(root))
 }
 
+/// Async + off-thread: also a `ps` scan — keep it off the main thread.
 #[tauri::command]
-fn pty_busy(state: State<'_, AppState>, id: String) -> bool {
-    match state.ptys.lock().unwrap().get(&id).and_then(|p| p.child_pid) {
-        Some(pid) => has_child_process(pid),
-        None => false,
+async fn pty_busy(state: State<'_, AppState>, id: String) -> Result<bool, String> {
+    let pid = state.ptys.lock().unwrap().get(&id).and_then(|p| p.child_pid);
+    match pid {
+        Some(pid) => tauri::async_runtime::spawn_blocking(move || has_child_process(pid))
+            .await
+            .map_err(|e| e.to_string()),
+        None => Ok(false),
     }
 }
 
 /// Current git branch for a folder (drives the terminal's context-chip bar).
 /// None when the folder isn't a repo or git is unavailable.
-#[tauri::command]
-fn git_branch(path: String) -> Option<String> {
+fn git_branch_blocking(path: &str) -> Option<String> {
     let out = std::process::Command::new("git")
-        .args(["-C", &path, "rev-parse", "--abbrev-ref", "HEAD"])
+        .args(["-C", path, "rev-parse", "--abbrev-ref", "HEAD"])
         .output()
         .ok()?;
     if !out.status.success() {
@@ -307,6 +330,15 @@ fn git_branch(path: String) -> Option<String> {
     }
     let b = String::from_utf8_lossy(&out.stdout).trim().to_string();
     if b.is_empty() { None } else { Some(b) }
+}
+
+/// Async + off-thread: spawns `git`; runs on every tab switch, so keep it off
+/// the main thread.
+#[tauri::command]
+async fn git_branch(path: String) -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || git_branch_blocking(&path))
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Re-scope the panel (prompts/notes/agents/skills/mcp) to a folder.

@@ -1,7 +1,6 @@
 // DevCLI — frontend: iTerm2/Ghostty-style split-tree terminals + Claude Code panel.
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
-import { WebglAddon } from "@xterm/addon-webgl";
 import { SearchAddon } from "@xterm/addon-search";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
@@ -71,10 +70,25 @@ async function copyText(text) {
     return ok;
   } catch (_) { return false; }
 }
-// Coalesce WKWebView-WebGL full repaints to one per animation frame per term.
-// Scroll and streaming output both fire in bursts; repainting the whole grid on
-// every event is what made scrolling and heavy output feel janky. One clean
-// frame per rAF is enough to clear WebGL's stale-cell ghosting, and cheap.
+// Coalesce WKWebView repaints to one per animation frame per term. Scroll and
+// streaming output both fire in bursts; repainting the whole grid on every event
+// is what made scrolling and heavy output feel janky. One clean frame per rAF is
+// enough to clear the accelerated renderer's stale-cell ghosting, and cheap.
+// Watch the PTY byte stream for the Kitty keyboard-protocol push/pop so
+// Shift+Enter knows whether an app (Claude Code) will read CSI 13;2u as a
+// newline. Push = `CSI > … u`, pop = `CSI < … u`. Scanning raw bytes is more
+// reliable than an xterm CSI hook. Kitty sequences are rare (startup / mode
+// change), and the ESC pre-check keeps the common case a single compare/byte.
+function scanKittyKbd(pane, b) {
+  for (let i = 0; i + 3 < b.length; i++) {
+    if (b[i] !== 0x1b || b[i + 1] !== 0x5b) continue;   // ESC [
+    const kind = b[i + 2];
+    if (kind !== 0x3e && kind !== 0x3c) continue;        // > (push) or < (pop)
+    let j = i + 3;
+    while (j < b.length && ((b[j] >= 0x30 && b[j] <= 0x39) || b[j] === 0x3b)) j++; // digits / ;
+    if (b[j] === 0x75) pane.kittyKbd = kind === 0x3e;    // final u → set state
+  }
+}
 function scheduleRefresh(term) {
   if (term._refreshQueued) return;
   term._refreshQueued = true;
@@ -439,30 +453,41 @@ function createLeafPane(tabId, cwd) {
   // URLs in the terminal become clickable — open in the default browser
   term.loadAddon(new WebLinksAddon((_e, uri) => invoke("open_external", { url: uri })));
   registerFilePathLinks(term, id); // file paths → preview, resolved against this pane's cwd
-  term.open(wrap);
-  // GPU-accelerated rendering; fall back to canvas if WebGL is unavailable
-  try {
-    const gl = new WebglAddon();
-    gl.onContextLoss(() => gl.dispose());
-    term.loadAddon(gl);
-  } catch (_) { /* canvas fallback */ }
+  term.open(wrap); // DOM renderer (no GPU addon) — see below
+  // No WebGL/Canvas addon: both GPU renderers are broken under WKWebView. WebGL
+  // evicts the glyph texture atlas mid-session (cells stamp blank, letters
+  // vanish); Canvas ghosts on scroll (stale backing isn't presented, and the
+  // fractional cell height from lineHeight 1.5 misaligns its clear-rects). The
+  // built-in DOM renderer has no atlas and no compositing layer, honours the 1.5
+  // line height via CSS, and is plenty fast for terminal output.
   fit.fit();
 
   // Shift+Enter → insert a newline instead of submitting. xterm sends a plain
-  // CR for Enter no matter the modifiers, so Claude Code (and most REPLs) can't
-  // tell Shift+Enter from Enter. Emit ESC+CR — the exact sequence Claude's
-  // `/terminal-setup` binds — which Claude reads as "newline", not send.
-  term.attachCustomKeyEventHandler((e) => {
-    if (e.type === "keydown" && e.key === "Enter" && e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) {
-      invoke("pty_write", { id, data: "\x1b\r" });
-      return false; // stop xterm from also sending a plain CR
+  // CR for Enter regardless of modifiers, so an app can't tell Shift+Enter from
+  // Enter unless it's using the Kitty keyboard protocol. Claude Code (v2.1+)
+  // turns that protocol on by pushing `CSI > 1 u`; while it's on, Shift+Enter is
+  // encoded as `CSI 13;2u` (keycode 13 = Enter, modifier 2 = Shift) and read as
+  // a newline. pane.kittyKbd tracks whether the foreground app pushed the
+  // protocol (set by scanning the PTY stream, see the pty-data listener) — we
+  // send the CSI-u form only when something is listening, else fall back to
+  // ESC+CR so a plain shell doesn't get literal `[13;2u` junk.
+  // Intercept in the capture phase on the pane element, BEFORE xterm's own
+  // keydown listener on its hidden textarea. Returning false from
+  // attachCustomKeyEventHandler does NOT stop xterm emitting a plain CR for
+  // Enter, so Claude would see our sequence *and* a CR = "newline then submit" =
+  // submit. stopImmediatePropagation here keeps xterm from seeing the key at all.
+  wrap.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) {
+      const on = panes.get(id)?.kittyKbd;
+      invoke("pty_write", { id, data: on ? "\x1b[13;2u" : "\x1b\r" });
+      e.preventDefault();
+      e.stopImmediatePropagation();
     }
-    return true;
-  });
+  }, { capture: true });
 
-  // Full repaint on scroll to clear WKWebView-WebGL stale-cell ghosting (box
-  // borders │ break into segments, glyphs bleed between rows). Coalesced to one
-  // repaint per frame — scroll fires in bursts, so per-event refresh was jank.
+  // Full repaint on scroll to clear WKWebView stale-cell ghosting (box borders │
+  // break into segments, glyphs bleed between rows). Coalesced to one repaint per
+  // frame — scroll fires in bursts, so per-event refresh was jank.
   term.onScroll(() => scheduleRefresh(term));
 
   // At a plain shell prompt (normal buffer) scroll the local scrollback and
@@ -476,7 +501,7 @@ function createLeafPane(tabId, cwd) {
     e.stopImmediatePropagation();
   }, { capture: true, passive: false });
 
-  const pane = { id, term, fit, search, draft: "", el: wrap, tabId };
+  const pane = { id, term, fit, search, draft: "", el: wrap, tabId, kittyKbd: false };
   panes.set(id, pane);
 
   // Claude Code sets the terminal title (OSC 0/2) to the session's summary.
@@ -680,7 +705,7 @@ async function closeLeaf(paneId) {
   if (!(await confirmCloseIfBusy([paneId], "this pane"))) return;
   if (!panes.get(paneId)) return; // bailed out / already gone while confirming
   invoke("pty_close", { id: paneId });
-  // guard teardown — a throw here (WebGL dispose can, in WKWebView) must NOT
+  // guard teardown — a throw here (renderer dispose can, in WKWebView) must NOT
   // abort the collapse below, else the pane's shell dies but the split stays
   try { pane.ro?.disconnect(); } catch (_) {}
   try { pane.term.dispose(); } catch (_) {}
@@ -1920,12 +1945,14 @@ async function init() {
   await listen("pty-data", (e) => {
     const pane = panes.get(e.payload.id);
     if (!pane) return;
-    // Same WKWebView WebGL bug the onScroll refresh works around: the renderer
+    // Same WKWebView renderer bug the onScroll refresh works around: it
     // only repaints cells it thinks changed, so a TUI that redraws lines in
     // place (Claude's live output) leaves stale glyph fragments — box borders
     // (│) shatter. onScroll doesn't fire for redraw-in-place, so force a clean
     // frame once the bytes are parsed (coalesced to one repaint per frame).
-    pane.term.write(b64ToBytes(e.payload.data), () => scheduleRefresh(pane.term));
+    const bytes = b64ToBytes(e.payload.data);
+    scanKittyKbd(pane, bytes); // track Shift+Enter capability (see makeTerm keys)
+    pane.term.write(bytes, () => scheduleRefresh(pane.term));
   });
   await listen("pty-exit", (e) =>
     panes.get(e.payload.id)?.term.write("\r\n\x1b[38;5;244m[process exited]\x1b[0m\r\n"));
