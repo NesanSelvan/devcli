@@ -337,40 +337,87 @@ function sizeTabs() {
   for (const t of tabsEls) t.style.flex = `0 0 ${w}px`;
 }
 let tabDragMoved = false;
-// drag a tab horizontally to reorder; a blue edge marks the drop slot
+// drag a tab horizontally to reorder (blue edge marks the slot), or down onto a
+// visible pane to dock the whole tab there as a split (edge quadrant = side)
 function startTabDrag(id, e0) {
   const bar = $("#term-tabs");
-  const startX = e0.clientX;
+  const startX = e0.clientX, startY = e0.clientY;
   tabDragMoved = false;
-  const clear = () => bar.querySelectorAll(".drop-before,.drop-after").forEach((t) => t.classList.remove("drop-before", "drop-after"));
+  const clear = () => {
+    bar.querySelectorAll(".drop-before,.drop-after,.drop-into").forEach((t) => t.classList.remove("drop-before", "drop-after", "drop-into"));
+    document.querySelectorAll(".term-pane.drop-left,.term-pane.drop-right,.term-pane.drop-top,.term-pane.drop-bottom")
+      .forEach((n) => n.classList.remove("drop-left", "drop-right", "drop-top", "drop-bottom"));
+  };
   const draggedEl = () => bar.querySelector(`.term-tab[data-id="${id}"]`);
+  // ghost chip so the tab visibly travels with the cursor (created on first real move)
+  let ghost = null;
+  const moveGhost = (x, y) => {
+    if (!ghost) {
+      const t = tabs.get(id);
+      const n = tabLeafIds(t).length;
+      ghost = el("div", "pane-drag-ghost", "⠿ " + (t?.name || "terminal") + (n > 1 ? ` ⊞${n}` : ""));
+      document.body.appendChild(ghost);
+      status("drop: middle of a tab = dock inside · tab edge = reorder · a pane's edge = dock there", true);
+    }
+    ghost.style.left = x + "px"; ghost.style.top = y + "px";
+  };
+  // pane of the visible tab under the cursor — only when dragging a NON-active
+  // tab (a tab can't dock into itself)
+  const paneUnder = (x, y) => {
+    if (id === activeTab) return null;
+    if (ghost) ghost.style.display = "none";
+    const p = document.elementFromPoint(x, y)?.closest?.(".term-pane");
+    if (ghost) ghost.style.display = "";
+    return p && panes.get(p.dataset.id)?.tabId === activeTab ? p : null;
+  };
   const onMove = (e) => {
-    if (!tabDragMoved && Math.abs(e.clientX - startX) < 5) return;
+    if (!tabDragMoved && Math.abs(e.clientX - startX) < 5 && Math.abs(e.clientY - startY) < 5) return;
     tabDragMoved = true;
     draggedEl()?.classList.add("dragging");
+    moveGhost(e.clientX, e.clientY);
     clear();
+    const p = paneUnder(e.clientX, e.clientY);
+    if (p) { p.classList.add("drop-" + dropSide(p, e.clientX, e.clientY)); return; }
     const over = [...bar.querySelectorAll(".term-tab")].find((t) => {
       const r = t.getBoundingClientRect();
       return e.clientX >= r.left && e.clientX <= r.right;
     });
     if (over && over.dataset.id !== id) {
+      // middle of another tab = dock this whole tab into it as a split;
+      // outer edges = the old reorder
       const r = over.getBoundingClientRect();
-      over.classList.add(e.clientX < r.left + r.width / 2 ? "drop-before" : "drop-after");
+      const rx = (e.clientX - r.left) / (r.width || 1);
+      if (rx > 0.3 && rx < 0.7) over.classList.add("drop-into");
+      else over.classList.add(rx < 0.5 ? "drop-before" : "drop-after");
     }
   };
-  const onUp = () => {
+  const finish = () => {
     window.removeEventListener("mousemove", onMove);
     window.removeEventListener("mouseup", onUp);
+    window.removeEventListener("keydown", onKey, true);
     draggedEl()?.classList.remove("dragging");
-    if (tabDragMoved) {
-      const target = bar.querySelector(".drop-before, .drop-after");
-      if (target) reorderTabs(id, target.dataset.id, target.classList.contains("drop-before"));
-      clear();
-    }
+    ghost?.remove();
+    clear();
+    if (tabDragMoved) status("");
     setTimeout(() => { tabDragMoved = false; }, 0); // let click read it, then reset
+  };
+  const onKey = (ev) => { if (ev.key === "Escape") { ev.preventDefault(); ev.stopPropagation(); finish(); } };
+  const onUp = (e) => {
+    const acted = tabDragMoved;
+    const p = acted ? paneUnder(e.clientX, e.clientY) : null;
+    const into = acted ? bar.querySelector(".term-tab.drop-into") : null;
+    const slot = acted ? bar.querySelector(".drop-before, .drop-after") : null;
+    finish();
+    if (!acted) return;
+    if (p) mergeTabIntoPane(id, p.dataset.id, dropSide(p, e.clientX, e.clientY));
+    else if (into) {
+      const dst = tabs.get(into.dataset.id);
+      if (dst) mergeTabIntoPane(id, dst.activeLeaf || tabLeafIds(dst)[0], "right");
+    } else if (slot) reorderTabs(id, slot.dataset.id, slot.classList.contains("drop-before"));
   };
   window.addEventListener("mousemove", onMove);
   window.addEventListener("mouseup", onUp);
+  window.addEventListener("keydown", onKey, true);
 }
 function renameTab(pane, nameEl) {
   const inp = el("input", "term-tab-input");
@@ -532,7 +579,7 @@ function createLeafPane(tabId, cwd) {
   // drag grip (shown when a tab is split) — pointer-drag it onto another pane to swap positions.
   // pointer events (not HTML5 DnD) so it works reliably over the xterm canvas.
   const grip = el("div", "pane-grip", "⠿ drag");
-  grip.title = "drag onto another pane to swap positions";
+  grip.title = "drag: pane middle = swap · pane edge = dock there · a tab = move into it · tab bar = new tab";
   grip.addEventListener("mousedown", (e) => { e.preventDefault(); e.stopPropagation(); startPaneDrag(id, wrap, e); });
   wrap.appendChild(grip);
 
@@ -557,7 +604,9 @@ function createLeafPane(tabId, cwd) {
   return pane;
 }
 
-// pointer-driven pane drag: a ghost follows the cursor, target pane highlights, swap on release
+// pointer-driven pane drag: a ghost follows the cursor. Drop on a sibling pane
+// to swap, on another tab's button to move there as a split, or on empty
+// tab-bar space to detach the pane into its own tab.
 function startPaneDrag(srcId, srcWrap, e0) {
   const src = panes.get(srcId);
   if (!src || tabLeafIds(tabs.get(src.tabId)).length < 2) return;
@@ -573,27 +622,58 @@ function startPaneDrag(srcId, srcWrap, e0) {
   const moveGhost = (x, y) => { ghost.style.left = x + "px"; ghost.style.top = y + "px"; };
   moveGhost(e0.clientX, e0.clientY);
 
-  const paneUnder = (x, y) => { ghost.style.display = "none"; const p = document.elementFromPoint(x, y)?.closest(".term-pane"); ghost.style.display = ""; return p; };
-  const clearOver = () => document.querySelectorAll(".term-pane.drag-over").forEach((n) => n.classList.remove("drag-over"));
-  const validTarget = (p) => p && p.dataset.id !== srcId && panes.get(p.dataset.id)?.tabId === src.tabId;
+  const bar = $("#term-tabs");
+  status("drop: pane middle = swap · pane edge = dock there · a tab = move into it · tab bar = new tab", true);
+  const under = (x, y) => { ghost.style.display = "none"; const n = document.elementFromPoint(x, y); ghost.style.display = ""; return n; };
+  const clearOver = () => {
+    document.querySelectorAll(".term-pane.drag-over,.term-pane.drop-left,.term-pane.drop-right,.term-pane.drop-top,.term-pane.drop-bottom")
+      .forEach((n) => n.classList.remove("drag-over", "drop-left", "drop-right", "drop-top", "drop-bottom"));
+    bar?.querySelectorAll(".term-tab.drop-into").forEach((n) => n.classList.remove("drop-into"));
+    bar?.classList.remove("drop-newtab");
+  };
+  // what's under the cursor: a sibling pane (middle = swap, edge = dock to that
+  // side), another tab's button (move into it), or empty tab-bar space / ＋
+  // (detach into a new tab)
+  const target = (x, y) => {
+    const n = under(x, y);
+    if (!n) return null;
+    const paneEl = n.closest?.(".term-pane");
+    if (paneEl && paneEl.dataset.id !== srcId && panes.get(paneEl.dataset.id)?.tabId === src.tabId)
+      return { pane: paneEl, zone: paneDropZone(paneEl, x, y) };
+    const tabBtn = n.closest?.(".term-tab");
+    if (tabBtn) return tabBtn.dataset.id !== src.tabId ? { tabBtn } : null; // own tab button = no-op
+    if (bar && (n === bar || bar.contains(n))) return { newTab: true };
+    return null;
+  };
   const onMove = (e) => {
     moveGhost(e.clientX, e.clientY);
     clearOver();
-    const p = paneUnder(e.clientX, e.clientY);
-    if (validTarget(p)) p.classList.add("drag-over");
+    const t = target(e.clientX, e.clientY);
+    if (t?.pane) t.pane.classList.add(t.zone === "center" ? "drag-over" : "drop-" + t.zone);
+    else if (t?.tabBtn) t.tabBtn.classList.add("drop-into");
+    else if (t?.newTab) bar.classList.add("drop-newtab");
   };
-  const onUp = (e) => {
+  const finish = () => {
     window.removeEventListener("mousemove", onMove);
     window.removeEventListener("mouseup", onUp);
+    window.removeEventListener("keydown", onKey, true);
     document.body.classList.remove("pane-dragging");
     srcWrap.classList.remove("drag-src");
     clearOver();
-    const p = paneUnder(e.clientX, e.clientY);
     ghost.remove();
-    if (validTarget(p)) swapLeaves(srcId, p.dataset.id);
+    status("");
+  };
+  const onKey = (ev) => { if (ev.key === "Escape") { ev.preventDefault(); ev.stopPropagation(); finish(); } };
+  const onUp = (e) => {
+    const t = target(e.clientX, e.clientY);
+    finish();
+    if (t?.pane) t.zone === "center" ? swapLeaves(srcId, t.pane.dataset.id) : moveLeafToSide(srcId, t.pane.dataset.id, t.zone);
+    else if (t?.tabBtn) moveLeafToTab(srcId, t.tabBtn.dataset.id);
+    else if (t?.newTab) detachLeafToNewTab(srcId);
   };
   window.addEventListener("mousemove", onMove);
   window.addEventListener("mouseup", onUp);
+  window.addEventListener("keydown", onKey, true);
 }
 
 // drag one pane onto another (same tab) to swap their slots in the layout
@@ -615,6 +695,116 @@ function swapLeaves(idA, idB) {
   layoutTab(tab);
   markActiveLeaf();
   status("panes swapped");
+}
+
+// ── moving panes between tabs (PTY untouched — only the tree + DOM move) ──
+// drop a split pane on empty tab-bar space / ＋ → it detaches into its own tab
+function detachLeafToNewTab(paneId) {
+  const pane = panes.get(paneId);
+  if (!pane) return;
+  const srcTab = tabs.get(pane.tabId);
+  if (!srcTab || tabLeafIds(srcTab).length < 2) return; // already alone in its tab
+  if (tabs.size >= MAX_TABS) return status("max tabs reached");
+  srcTab.root = removeLeaf(srcTab.root, paneId);
+  if (srcTab.activeLeaf === paneId) srcTab.activeLeaf = tabLeafIds(srcTab)[0];
+  const tab = createTabShell();
+  tab.root = { paneId };
+  tab.activeLeaf = paneId;
+  pane.tabId = tab.id;
+  layoutTab(srcTab);
+  layoutTab(tab);
+  activeTab = tab.id;
+  renderTermTabs();
+  showActive();
+  markActiveLeaf();
+  status("pane moved to its own tab");
+  scheduleSave();
+}
+// drop a split pane on another tab's button → it joins that tab as a split
+function moveLeafToTab(paneId, dstTabId) {
+  const pane = panes.get(paneId);
+  const dst = tabs.get(dstTabId);
+  if (!pane || !dst || pane.tabId === dstTabId) return;
+  const srcTab = tabs.get(pane.tabId);
+  if (tabLeafIds(dst).length >= 12) return status("max splits in that tab");
+  srcTab.root = removeLeaf(srcTab.root, paneId);
+  pane.tabId = dstTabId;
+  const anchor = dst.activeLeaf || tabLeafIds(dst)[0];
+  dst.root = replaceLeaf(dst.root, anchor, { dir: "row", a: { paneId: anchor }, b: { paneId }, sizeA: 0.5 });
+  dst.activeLeaf = paneId;
+  if (srcTab.root) {
+    if (srcTab.activeLeaf === paneId) srcTab.activeLeaf = tabLeafIds(srcTab)[0];
+    layoutTab(srcTab);
+  } else {
+    // pane was the tab's last leaf — the empty shell goes away
+    srcTab.el.remove();
+    tabs.delete(srcTab.id);
+  }
+  layoutTab(dst);
+  activeTab = dstTabId;
+  renderTermTabs();
+  showActive();
+  markActiveLeaf();
+  status(`pane moved into "${dst.name}"`);
+  scheduleSave();
+}
+// drop a whole tab onto a visible pane → its split-tree docks there as a split;
+// `side` (left/right/top/bottom) picks the split direction and order
+function mergeTabIntoPane(srcTabId, targetPaneId, side) {
+  const srcTab = tabs.get(srcTabId);
+  const target = panes.get(targetPaneId);
+  if (!srcTab || !target || target.tabId === srcTabId) return;
+  const dst = tabs.get(target.tabId);
+  const srcLeaves = tabLeafIds(srcTab);
+  if (srcLeaves.length + tabLeafIds(dst).length > 12) return status("max splits in this tab");
+  for (const pid of srcLeaves) panes.get(pid).tabId = dst.id;
+  const dir = side === "left" || side === "right" ? "row" : "col";
+  const srcFirst = side === "left" || side === "top";
+  const t = { paneId: targetPaneId };
+  dst.root = replaceLeaf(dst.root, targetPaneId,
+    { dir, a: srcFirst ? srcTab.root : t, b: srcFirst ? t : srcTab.root, sizeA: 0.5 });
+  srcTab.el.remove(); // pane els still hang off the detached container; layoutTab re-homes them
+  tabs.delete(srcTabId);
+  dst.activeLeaf = srcLeaves[0];
+  activeTab = dst.id;
+  layoutTab(dst);
+  renderTermTabs();
+  showActive();
+  markActiveLeaf();
+  status(`"${srcTab.name}" docked as split`);
+  scheduleSave();
+}
+// which edge of the pane the cursor is nearest — decides docking side
+function dropSide(paneEl, x, y) {
+  const r = paneEl.getBoundingClientRect();
+  const rx = (x - r.left) / (r.width || 1), ry = (y - r.top) / (r.height || 1);
+  const d = Math.min(rx, 1 - rx, ry, 1 - ry);
+  return d === rx ? "left" : d === 1 - rx ? "right" : d === ry ? "top" : "bottom";
+}
+// pane drop zone: middle ≈ half the pane = swap, outer band = dock to that side
+function paneDropZone(paneEl, x, y) {
+  const r = paneEl.getBoundingClientRect();
+  const rx = (x - r.left) / (r.width || 1), ry = (y - r.top) / (r.height || 1);
+  if (rx > 0.28 && rx < 0.72 && ry > 0.28 && ry < 0.72) return "center";
+  return dropSide(paneEl, x, y);
+}
+// re-dock a pane against a sibling's side (same tab); center-drop swaps instead
+function moveLeafToSide(srcId, targetId, side) {
+  if (srcId === targetId) return;
+  const src = panes.get(srcId), tgt = panes.get(targetId);
+  if (!src || !tgt || src.tabId !== tgt.tabId) return;
+  const tab = tabs.get(src.tabId);
+  tab.root = removeLeaf(tab.root, srcId);
+  if (!tab.root) return; // can't happen while the tab is split, but never leave a null tree
+  const dir = side === "left" || side === "right" ? "row" : "col";
+  const srcFirst = side === "left" || side === "top";
+  const s = { paneId: srcId }, t = { paneId: targetId };
+  tab.root = replaceLeaf(tab.root, targetId, { dir, a: srcFirst ? s : t, b: srcFirst ? t : s, sizeA: 0.5 });
+  tab.activeLeaf = srcId;
+  layoutTab(tab);
+  markActiveLeaf();
+  status("pane docked " + side);
+  scheduleSave();
 }
 
 // ── split-tree rendering ─────────────────────────────────────────────
@@ -734,6 +924,13 @@ function openPaneMenu(x, y, paneId) {
   };
   item("▐", "Split right", () => splitLeaf(paneId, "row"));
   item("▄", "Split down", () => splitLeaf(paneId, "col"));
+  // move this pane elsewhere (menu fallback for the grip drag)
+  const srcTab = tabs.get(panes.get(paneId)?.tabId);
+  const split = srcTab && tabLeafIds(srcTab).length > 1;
+  menu.appendChild(el("div", "ctx-sep"));
+  item("⬈", "Move to new tab", () => detachLeafToNewTab(paneId), !split);
+  for (const t of [...tabs.values()].filter((t) => t.id !== srcTab?.id).slice(0, 8))
+    item("⊞", `Move into “${t.name}”`, () => moveLeafToTab(paneId, t.id));
   menu.appendChild(el("div", "ctx-sep"));
   item("✕", "Close pane", () => closeLeaf(paneId), panes.size <= 1);
   menu.classList.remove("hidden");
@@ -753,15 +950,21 @@ function nextTermNumber() {
   return max + 1;
 }
 
-// a tab = a container in #terms holding one split-tree of leaf terminals
-function createTab(name) {
+// a tab = a container in #terms holding one split-tree of leaf terminals.
+// createTabShell makes the empty container (used when an existing pane moves in);
+// createTab also spawns a fresh terminal pane inside it.
+function createTabShell(name) {
   const id = nextTabId();
   const container = el("div", "term-tab-root");
   container.dataset.tab = id;
   $("#terms").appendChild(container);
   const tab = { id, name: name || `Terminal ${nextTermNumber()}`, autoNamed: !name, pinned: false, color: null, el: container, root: null, activeLeaf: null };
   tabs.set(id, tab);
-  const pane = createLeafPane(id);
+  return tab;
+}
+function createTab(name) {
+  const tab = createTabShell(name);
+  const pane = createLeafPane(tab.id);
   tab.root = { paneId: pane.id };
   tab.activeLeaf = pane.id;
   layoutTab(tab);
@@ -1022,6 +1225,12 @@ function openTabMenu(x, y, id) {
   item("●", p.pinned ? "Unpin tab" : "Pin tab", () => togglePin(id));
   item("▐", "Split right", () => splitLeaf(p.activeLeaf, "row"));
   item("▄", "Split down", () => splitLeaf(p.activeLeaf, "col"));
+  // dock this whole tab inside another one (menu fallback for drag-to-dock)
+  const others = [...tabs.values()].filter((t) => t.id !== id).slice(0, 8);
+  if (others.length) {
+    menu.appendChild(el("div", "ctx-sep"));
+    for (const t of others) item("⊞", `Dock into “${t.name}”`, () => mergeTabIntoPane(id, t.activeLeaf || tabLeafIds(t)[0], "right"));
+  }
   // color swatches
   const cw = el("div", "ctx-colors");
   const none = el("button", "ctx-swatch ctx-swatch-none");

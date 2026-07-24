@@ -208,6 +208,20 @@ body {
 .term-pane.drag-over { box-shadow: inset 0 0 0 2px var(--accent-2); }
 body.pane-dragging { cursor: grabbing !important; }
 body.pane-dragging .term-pane, body.pane-dragging .xterm { user-select: none !important; }
+/* pane-drag targets in the tab bar: a tab button (move into it) or empty bar space (new tab) */
+.term-tab.drop-into { box-shadow: inset 0 0 0 2px var(--accent-2); }
+#term-tabs.drop-newtab { box-shadow: inset 0 0 0 2px var(--accent-2); border-radius: 8px; }
+/* tab dragged onto a visible pane: highlight the half it would dock into */
+.term-pane.drop-left::after, .term-pane.drop-right::after,
+.term-pane.drop-top::after, .term-pane.drop-bottom::after {
+  content: ""; position: absolute; z-index: 5; pointer-events: none;
+  background: var(--accent-2); opacity: .22;
+  border: 2px solid var(--accent-2); border-radius: 6px;
+}
+.term-pane.drop-left::after   { left: 2px; top: 2px; bottom: 2px; width: 50%; }
+.term-pane.drop-right::after  { right: 2px; top: 2px; bottom: 2px; width: 50%; }
+.term-pane.drop-top::after    { left: 2px; right: 2px; top: 2px; height: 50%; }
+.term-pane.drop-bottom::after { left: 2px; right: 2px; bottom: 2px; height: 50%; }
 /* floating terminal that follows the cursor while dragging */
 .pane-drag-ghost {
   position: fixed; z-index: 200; pointer-events: none;

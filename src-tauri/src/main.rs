@@ -122,6 +122,13 @@ fn pty_spawn(app: AppHandle, state: State<'_, AppState>, id: String, rows: u16, 
         .unwrap_or_else(|| state.dir());
     cmd.cwd(start);
     cmd.env("TERM", "xterm-256color");
+    // GUI-launched apps inherit no locale, leaving the whole shell tree in
+    // LC_CTYPE=C — locale-aware tools then mangle non-ASCII (UTF-8 read as
+    // MacRoman: ▎ → ‚ñé). Export a UTF-8 LANG like Terminal.app/iTerm2 do,
+    // keeping any locale the user's launch env already set.
+    if std::env::var("LANG").map_or(true, |v| v.is_empty()) {
+        cmd.env("LANG", "en_US.UTF-8");
+    }
     // Advertise Kitty keyboard-protocol support so Claude Code turns it on and
     // reads Shift+Enter (CSI 13;2u, sent by the frontend) as a newline instead
     // of submit. Claude's detection skips the KITTY_WINDOW_ID signal when
