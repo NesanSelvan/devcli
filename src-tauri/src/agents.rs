@@ -61,7 +61,13 @@ fn parse_frontmatter(raw: &str) -> (Option<String>, Option<String>) {
 // agent definitions. Only files with YAML frontmatter count, so stray docs
 // (README, notes) are skipped.
 fn read_agents(dir: &Path, scope: &str, out: &mut Vec<Item>) {
-    for entry in WalkDir::new(dir).max_depth(6).into_iter().filter_map(|e| e.ok()) {
+    // follow_links: agent files may be symlinked in (e.g. dotfiles managers)
+    for entry in WalkDir::new(dir)
+        .max_depth(6)
+        .follow_links(true)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
         if !entry.file_type().is_file() {
             continue;
         }
@@ -94,7 +100,13 @@ fn read_agents(dir: &Path, scope: &str, out: &mut Vec<Item>) {
 
 // Walk the skills dir (and subfolders) for any `SKILL.md` at any depth.
 fn read_skills(dir: &Path, scope: &str, out: &mut Vec<Item>) {
-    for entry in WalkDir::new(dir).max_depth(8).into_iter().filter_map(|e| e.ok()) {
+    // follow_links: superpowers et al. symlink each skill dir into ~/.claude/skills
+    for entry in WalkDir::new(dir)
+        .max_depth(8)
+        .follow_links(true)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
         if !entry.file_type().is_file() || entry.file_name() != "SKILL.md" {
             continue;
         }
