@@ -1066,7 +1066,7 @@ async function serializeNode(node) {
     invoke("pty_cwd", { id: node.paneId }).catch(() => null),
     invoke("pty_has_claude", { id: node.paneId }).catch(() => false),
   ]);
-  return { cwd: cwd || null, claude: !!claude };
+  return { cwd: cwd || null, claude: !!claude, collapsed: !!node.collapsed };
 }
 async function saveLayout() {
   try {
@@ -1086,7 +1086,7 @@ function buildSaved(tabId, node, claudePanes) {
   }
   const pane = createLeafPane(tabId, node && node.cwd);
   if (node && node.claude) claudePanes.push(pane.id);
-  return { paneId: pane.id };
+  return node && node.collapsed ? { paneId: pane.id, collapsed: true } : { paneId: pane.id };
 }
 function restoreTab(saved) {
   const id = nextTabId();
@@ -1100,7 +1100,8 @@ function restoreTab(saved) {
   tabs.set(id, tab);
   const claudePanes = [];
   tab.root = buildSaved(tab.id, saved.root, claudePanes);
-  tab.activeLeaf = tabLeafIds(tab)[0];
+  // a restored tab must not focus a pane that came back collapsed
+  tab.activeLeaf = visibleLeafIds(tab.root)[0] || tabLeafIds(tab)[0];
   layoutTab(tab);
   // resume Claude after the shell has settled (best-effort)
   for (const pid of claudePanes) {
