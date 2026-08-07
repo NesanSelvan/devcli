@@ -951,6 +951,37 @@ async function closeLeaf(paneId) {
 }
 
 // right-click a terminal pane → split / close
+// collapse a split pane to a strip; its shell keeps running behind the strip
+async function collapsePane(paneId) {
+  const tab = tabs.get(panes.get(paneId)?.tabId);
+  if (!tab || !canCollapse(tab.root, paneId)) return;
+  // syncProjectDir only ever caches cwd for the ACTIVE pane, and collapsing moves
+  // focus away — so resolve this pane's folder now, while we still can, or the
+  // strip would be stuck reading "terminal".
+  const p = panes.get(paneId);
+  const cwd = await invoke("pty_cwd", { id: paneId }).catch(() => null);
+  if (p && cwd) p.cwd = cwd;
+  setCollapsed(tab.root, paneId, true);
+  // never leave focus on a hidden terminal — keystrokes would vanish into it
+  if (tab.activeLeaf === paneId) {
+    const next = nextFocusAfterCollapse(tab.root, paneId);
+    if (next) { tab.activeLeaf = next; activeId = next; }
+  }
+  layoutTab(tab);
+  markActiveLeaf();
+  scheduleSave();
+}
+function restorePane(paneId) {
+  const tab = tabs.get(panes.get(paneId)?.tabId);
+  if (!tab) return;
+  setCollapsed(tab.root, paneId, false);
+  tab.activeLeaf = paneId;
+  activeId = paneId;
+  layoutTab(tab);
+  markActiveLeaf();
+  panes.get(paneId)?.term?.focus();
+  scheduleSave();
+}
 function openPaneMenu(x, y, paneId) {
   const menu = $("#ctx");
   menu.innerHTML = "";
@@ -963,6 +994,8 @@ function openPaneMenu(x, y, paneId) {
   };
   item("▐", "Split right", () => splitLeaf(paneId, "row"));
   item("▄", "Split down", () => splitLeaf(paneId, "col"));
+  item("▁", "Collapse pane", () => collapsePane(paneId),
+       !canCollapse(tabs.get(panes.get(paneId)?.tabId)?.root, paneId));
   // move this pane elsewhere (menu fallback for the grip drag)
   const srcTab = tabs.get(panes.get(paneId)?.tabId);
   const split = srcTab && tabLeafIds(srcTab).length > 1;
@@ -2245,6 +2278,11 @@ async function init() {
   $("#compose-input").addEventListener("input", () => autoGrow($("#compose-input")));
   $("#btn-theme").addEventListener("click", () => setTheme(currentTheme === "light" ? "dark" : "light"));
   $("#tab-add").addEventListener("click", newTab);
+  // strips are rebuilt on every layout, so listen on the container instead
+  $("#terms").addEventListener("click", (e) => {
+    const strip = e.target.closest?.(".pane-collapsed");
+    if (strip) restorePane(strip.dataset.id);
+  });
   $("#btn-collapse").addEventListener("click", () => setPanel(false));
   $("#panel-reopen").addEventListener("click", () => setPanel(true));
 
