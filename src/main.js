@@ -10,6 +10,9 @@ import { check } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import hljs from "highlight.js/lib/common";
+import {
+  canCollapse, isLeafNode, leafIdsOf, nextFocusAfterCollapse, setCollapsed, visibleLeafIds,
+} from "./split-tree.js";
 
 // ---------- DOM helpers ----------
 const $ = (s) => document.querySelector(s);
@@ -167,19 +170,17 @@ const TAB_COLORS = ["#2DD4BF", "#58A6FF", "#3FB950", "#D29922", "#F85149", "#A97
 
 // ── layout tree helpers ──────────────────────────────────────────────
 // node is either a leaf { paneId } or a split { dir:'row'|'col', a, b, sizeA }
-const isLeaf = (n) => n && n.paneId != null;
-const leafIds = (n) => (isLeaf(n) ? [n.paneId] : [...leafIds(n.a), ...leafIds(n.b)]);
-const tabLeafIds = (tab) => (tab?.root ? leafIds(tab.root) : []);
+const tabLeafIds = (tab) => (tab?.root ? leafIdsOf(tab.root) : []);
 // replace the leaf carrying paneId with `repl` (used by split)
 function replaceLeaf(node, paneId, repl) {
-  if (isLeaf(node)) return node.paneId === paneId ? repl : node;
+  if (isLeafNode(node)) return node.paneId === paneId ? repl : node;
   node.a = replaceLeaf(node.a, paneId, repl);
   node.b = replaceLeaf(node.b, paneId, repl);
   return node;
 }
 // drop the leaf carrying paneId; a split with one survivor collapses to it
 function removeLeaf(node, paneId) {
-  if (isLeaf(node)) return node.paneId === paneId ? null : node;
+  if (isLeafNode(node)) return node.paneId === paneId ? null : node;
   const a = removeLeaf(node.a, paneId);
   const b = removeLeaf(node.b, paneId);
   if (!a) return b;
@@ -680,7 +681,7 @@ function startPaneDrag(srcId, srcWrap, e0) {
 
 // drag one pane onto another (same tab) to swap their slots in the layout
 function swapInTree(node, idA, idB) {
-  if (isLeaf(node)) {
+  if (isLeafNode(node)) {
     if (node.paneId === idA) node.paneId = idB;
     else if (node.paneId === idB) node.paneId = idA;
     return;
@@ -810,12 +811,45 @@ function moveLeafToSide(srcId, targetId, side) {
 }
 
 // ── split-tree rendering ─────────────────────────────────────────────
-function renderNode(node) {
-  if (isLeaf(node)) return panes.get(node.paneId)?.el || el("div", "term-pane");
+// A collapsed leaf renders as a thin strip PLUS its pane element kept mounted at
+// display:none. Detaching the pane instead would leave xterm measuring a node
+// outside the document and fit() would return NaN, so it stays in the tree.
+function renderCollapsed(node, dir) {
+  const wrap = el("div", "pane-collapsed pane-collapsed-" + dir);
+  wrap.dataset.id = node.paneId;
+  const strip = el("div", "pane-strip");
+  strip.appendChild(el("span", "pane-strip-chevron", "▸"));
+  strip.appendChild(el("span", "pane-strip-label", stripLabel(node.paneId)));
+  wrap.appendChild(strip);
+  const pane = panes.get(node.paneId)?.el;
+  if (pane) { pane.style.display = "none"; wrap.appendChild(pane); }
+  return wrap;
+}
+// strips are narrow, so label with the folder basename rather than the full path.
+// pane.cwd is a cache written by syncProjectDir and by collapsePane (Task 4) —
+// resolving it here is impossible, since pty_cwd is async and this runs mid-render.
+function stripLabel(paneId) {
+  const cwd = panes.get(paneId)?.cwd;
+  const base = cwd ? cwd.replace(/(.)\/+$/, "$1").split("/").pop() : "";
+  return base || "terminal";
+}
+function renderNode(node, parentDir) {
+  if (isLeafNode(node)) {
+    if (node.collapsed) return renderCollapsed(node, parentDir || "col");
+    const pane = panes.get(node.paneId)?.el;
+    if (pane) pane.style.display = "";        // undo a previous collapse
+    return pane || el("div", "term-pane");
+  }
   const box = el("div", "split split-" + node.dir);
-  const ca = renderNode(node.a); ca.style.flex = node.sizeA + " 1 0";
-  const cb = renderNode(node.b); cb.style.flex = (1 - node.sizeA) + " 1 0";
-  box.append(ca, makeDivider(node, box, ca, cb), cb);
+  const ca = renderNode(node.a, node.dir);
+  const cb = renderNode(node.b, node.dir);
+  // a collapsed side is fixed at the strip thickness; the sibling takes the rest.
+  // node.sizeA is deliberately left untouched so the old ratio returns on restore.
+  const aOff = isLeafNode(node.a) && node.a.collapsed;
+  const bOff = isLeafNode(node.b) && node.b.collapsed;
+  ca.style.flex = aOff ? "0 0 26px" : bOff ? "1 1 0" : node.sizeA + " 1 0";
+  cb.style.flex = bOff ? "0 0 26px" : aOff ? "1 1 0" : (1 - node.sizeA) + " 1 0";
+  box.append(ca, makeDivider(node, box, ca, cb, aOff || bOff), cb);
   return box;
 }
 // rebuild a tab's DOM from its tree (pane wraps are moved, not recreated)
@@ -828,8 +862,9 @@ function layoutTab(tab) {
   requestAnimationFrame(() => fitTab(tab));
 }
 // draggable splitter between the two children of a split
-function makeDivider(node, box, elA, elB) {
-  const d = el("div", "divider divider-" + node.dir);
+function makeDivider(node, box, elA, elB, inert) {
+  const d = el("div", "divider divider-" + node.dir + (inert ? " divider-inert" : ""));
+  if (inert) return d;                        // nothing to drag against a fixed-width strip
   d.addEventListener("mousedown", (e) => {
     e.preventDefault(); e.stopPropagation();
     const horiz = node.dir === "row";
@@ -981,7 +1016,7 @@ function refitAll() {
 // ── session persistence: restore tabs/splits/folders on reopen ────────
 // leaf → { cwd, claude }   split → { dir, sizeA, a, b }
 async function serializeNode(node) {
-  if (!isLeaf(node)) {
+  if (!isLeafNode(node)) {
     return { dir: node.dir, sizeA: node.sizeA, a: await serializeNode(node.a), b: await serializeNode(node.b) };
   }
   const [cwd, claude] = await Promise.all([
