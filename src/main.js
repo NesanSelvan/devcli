@@ -10,6 +10,12 @@ import { check } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import hljs from "highlight.js/lib/common";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { homeDir } from "@tauri-apps/api/path";
+import {
+  canCollapse, isLeafNode, leafIdsOf, nextFocusAfterCollapse, setCollapsed, visibleLeafIds,
+} from "./split-tree.js";
+import { addRecent, shortenHome, splitPath } from "./recent-folders.js";
 
 // ---------- DOM helpers ----------
 const $ = (s) => document.querySelector(s);
@@ -167,25 +173,40 @@ const TAB_COLORS = ["#2DD4BF", "#58A6FF", "#3FB950", "#D29922", "#F85149", "#A97
 
 // ── layout tree helpers ──────────────────────────────────────────────
 // node is either a leaf { paneId } or a split { dir:'row'|'col', a, b, sizeA }
-const isLeaf = (n) => n && n.paneId != null;
-const leafIds = (n) => (isLeaf(n) ? [n.paneId] : [...leafIds(n.a), ...leafIds(n.b)]);
-const tabLeafIds = (tab) => (tab?.root ? leafIds(tab.root) : []);
+const tabLeafIds = (tab) => (tab?.root ? leafIdsOf(tab.root) : []);
 // replace the leaf carrying paneId with `repl` (used by split)
 function replaceLeaf(node, paneId, repl) {
-  if (isLeaf(node)) return node.paneId === paneId ? repl : node;
+  if (isLeafNode(node)) return node.paneId === paneId ? repl : node;
   node.a = replaceLeaf(node.a, paneId, repl);
   node.b = replaceLeaf(node.b, paneId, repl);
   return node;
 }
 // drop the leaf carrying paneId; a split with one survivor collapses to it
-function removeLeaf(node, paneId) {
-  if (isLeaf(node)) return node.paneId === paneId ? null : node;
-  const a = removeLeaf(node.a, paneId);
-  const b = removeLeaf(node.b, paneId);
+function removeLeafRec(node, paneId) {
+  if (isLeafNode(node)) return node.paneId === paneId ? null : node;
+  const a = removeLeafRec(node.a, paneId);
+  const b = removeLeafRec(node.b, paneId);
   if (!a) return b;
   if (!b) return a;
   node.a = a; node.b = b;
   return node;
+}
+// every call site below passes a tab's full root, so this outer wrapper is the
+// one place that sees the WHOLE resulting tree. Checking visibility inside
+// removeLeafRec's own survivor branch was tried and rejected: mid-recursion it
+// only sees the subtree at the immediate parent of the removed leaf, so it can
+// misfire — forcing a collapsed sibling back open even though some unrelated,
+// already-visible leaf survives elsewhere in the tree. Checking once here, on
+// the final root, avoids that false positive while still fixing the real bug:
+// a tab whose only remaining leaves are all collapsed would focus a hidden
+// (display:none) terminal and swallow every keystroke (review Finding 1).
+function removeLeaf(node, paneId) {
+  const result = removeLeafRec(node, paneId);
+  if (result && visibleLeafIds(result).length === 0) {
+    const id = leafIdsOf(result)[0];
+    if (id != null) setCollapsed(result, id, false);
+  }
+  return result;
 }
 
 let fontSize = Math.max(8, Math.min(28, parseInt(localStorage.getItem("devcli-fontsize") || "13", 10) || 13));
@@ -241,7 +262,9 @@ function showActive() {
 }
 // fit + resize every leaf terminal of a tab (call after layout / resize)
 function fitTab(tab) {
-  for (const id of tabLeafIds(tab)) {
+  // Collapsed panes are display:none, so fit() would measure 0 and we'd resize the
+  // PTY to 0x0 — that wrecks the shell's line editing. Only fit what's on screen.
+  for (const id of visibleLeafIds(tab?.root)) {
     const p = panes.get(id);
     if (!p) continue;
     try { p.fit.fit(); } catch (_) {}
@@ -250,7 +273,7 @@ function fitTab(tab) {
 }
 // outline the focused leaf when a tab is split into more than one pane
 function markActiveLeaf() {
-  const multi = tabLeafIds(tabs.get(activeTab)).length > 1;
+  const multi = visibleLeafIds(tabs.get(activeTab)?.root).length > 1;
   for (const [id, p] of panes) {
     p.el.classList.toggle("multi", multi && p.tabId === activeTab);
     p.el.classList.toggle("active", multi && id === activeId);
@@ -274,13 +297,73 @@ function reorderTabs(draggedId, targetId, before) {
   renderTermTabs();
   saveLayout(); // persist the new order now (not debounced) so it survives a quick quit
 }
+// open a folder in a NEW tab (not a split) — the tab self-names from the folder
+async function openFolderInNewTab(path) {
+  if (!path) return;
+  rememberFolder(path);
+  const tab = createTab(null, path);
+  activeTab = tab.id;
+  renderTermTabs(); // match every other tab-creating path — the new tab button must appear now, not whenever syncProjectDir next happens to fire
+  showActive();
+  scheduleSave();
+}
+async function pickFolder() {
+  const picked = await openDialog({ directory: true, multiple: false }).catch(() => null);
+  if (typeof picked === "string") await openFolderInNewTab(picked);
+}
+// ▾ next to ＋: open-folder plus the recent list
+// bumped on every openAddMenu call and by closeMenu(); a build only renders if its
+// token is still current when its awaits resolve — so a second ▾ click (or an
+// Escape/outside-click dismiss) while one build is in flight can't interleave DOM
+// writes with it or pop the menu open again after the user cancelled
+let addMenuToken = 0;
+async function openAddMenu(x, y) {
+  const token = ++addMenuToken;
+  const home = await homeDir().catch(() => "");
+  const paths = loadRecents();
+  // a folder can be deleted or unmounted after we recorded it — filter at render
+  // time rather than pruning the store, so a temporary absence isn't permanent.
+  // Check every entry concurrently (was up to 15 sequential IPC round-trips before
+  // the menu could show); Promise.all resolves in array order, so the newest-first
+  // order from loadRecents() survives the filter.
+  const exists = await Promise.all(paths.map((p) => invoke("path_is_dir", { path: p }).catch(() => false)));
+  if (token !== addMenuToken) return; // superseded by a newer build, or dismissed while this was loading
+  const recents = paths.filter((_, i) => exists[i]);
+
+  const menu = $("#ctx");
+  menu.innerHTML = "";
+  const item = (glyph, label, fn, hint) => {
+    const r = el("div", "ctx-item");
+    r.appendChild(el("span", "ctx-glyph", glyph || ""));
+    r.appendChild(el("span", null, label));
+    if (hint) r.appendChild(el("span", "k", hint));
+    r.addEventListener("click", () => { closeMenu(); fn(); });
+    menu.appendChild(r);
+  };
+  item("📂", "Open folder…", pickFolder, "⌘⇧O");
+  if (recents.length) {
+    menu.appendChild(el("div", "ctx-sep"));
+    menu.appendChild(el("div", "ctx-head", "RECENT"));
+    for (const p of recents) {
+      const { base, parent } = splitPath(p);
+      item("", base, () => openFolderInNewTab(p), shortenHome(parent, home.replace(/\/+$/, "")));
+    }
+    menu.appendChild(el("div", "ctx-sep"));
+    item("", "Clear recents", clearRecents);
+  }
+  menu.classList.remove("hidden");
+  const mw = 260, mh = menu.offsetHeight || 160;
+  menu.style.left = Math.min(x, window.innerWidth - mw - 8) + "px";
+  menu.style.top = Math.min(y, window.innerHeight - mh - 8) + "px";
+}
 // top bar: one tab per terminal — rename, pin, color, close, drag-to-reorder
 function renderTermTabs() {
   const bar = $("#term-tabs");
   if (!bar) return;
-  // grab ＋ BEFORE clearing — it lives inside the row, so innerHTML="" would
-  // destroy it (holding a ref keeps the element alive)
+  // grab ＋ / ▾ BEFORE clearing — they live inside the row, so innerHTML="" would
+  // destroy them (holding a ref keeps the elements alive)
   const addBtn = $("#tab-add");
+  const addMenuBtn = $("#tab-add-menu");
   bar.innerHTML = "";
   for (const p of orderedTabs()) {
     const nLeaves = tabLeafIds(p).length;
@@ -308,9 +391,10 @@ function renderTermTabs() {
     });
     bar.appendChild(tab);
   }
-  // keep ＋ right after the last tab; the empty tab-row space after it is a
+  // keep ＋ / ▾ right after the last tab; the empty tab-row space after them is a
   // window-drag region (term-tabs has data-tauri-drag-region)
   if (addBtn) bar.appendChild(addBtn);
+  if (addMenuBtn) bar.appendChild(addMenuBtn);
   sizeTabs();
 }
 
@@ -329,7 +413,7 @@ function sizeTabs() {
   // grow:1 .appbar-drag sibling). Reserve the traffic-light pad, cwd label, the
   // ＋ button, and a drag strip; the tabs share whatever's left.
   const appbar = document.querySelector(".appbar");
-  const addW = $("#tab-add")?.offsetWidth || 30;
+  const addW = ($("#tab-add")?.offsetWidth || 30) + ($("#tab-add-menu")?.offsetWidth || 18);
   const cwdW = $("#cwd-label")?.offsetWidth || 0;
   const dragStrip = 32;                                   // always keep a window-drag strip after the tabs
   const avail = (appbar?.clientWidth || window.innerWidth) - 90 /*L+R pad*/ - cwdW - addW - dragStrip - 4 * n;
@@ -551,6 +635,12 @@ function createLeafPane(tabId, cwd) {
   }, { capture: true, passive: false });
 
   const pane = { id, term, fit, search, draft: "", el: wrap, tabId, kittyKbd: false };
+  // seed a starting-folder hint from the caller (session restore passes the saved
+  // cwd) so a strip doesn't read "terminal" if this pane comes back collapsed and
+  // never becomes active — syncProjectDir only caches cwd for the active pane, so
+  // without this the cache would stay empty forever. Just a hint: the live value
+  // still comes from pty_cwd via syncProjectDir / collapsePane, which overwrite it.
+  if (cwd) pane.cwd = cwd;
   panes.set(id, pane);
 
   // Claude Code sets the terminal title (OSC 0/2) to the session's summary.
@@ -680,7 +770,7 @@ function startPaneDrag(srcId, srcWrap, e0) {
 
 // drag one pane onto another (same tab) to swap their slots in the layout
 function swapInTree(node, idA, idB) {
-  if (isLeaf(node)) {
+  if (isLeafNode(node)) {
     if (node.paneId === idA) node.paneId = idB;
     else if (node.paneId === idB) node.paneId = idA;
     return;
@@ -810,12 +900,46 @@ function moveLeafToSide(srcId, targetId, side) {
 }
 
 // ── split-tree rendering ─────────────────────────────────────────────
-function renderNode(node) {
-  if (isLeaf(node)) return panes.get(node.paneId)?.el || el("div", "term-pane");
+// A collapsed leaf renders as a thin strip PLUS its pane element kept mounted at
+// display:none. Detaching the pane instead would leave xterm measuring a node
+// outside the document and fit() would return NaN, so it stays in the tree.
+function renderCollapsed(node, dir) {
+  const wrap = el("div", "pane-collapsed pane-collapsed-" + dir);
+  wrap.dataset.id = node.paneId;
+  const strip = el("div", "pane-strip");
+  strip.appendChild(el("span", "pane-strip-chevron", "▸"));
+  strip.appendChild(el("span", "pane-strip-label", stripLabel(node.paneId)));
+  wrap.appendChild(strip);
+  const pane = panes.get(node.paneId)?.el;
+  if (pane) { pane.style.display = "none"; wrap.appendChild(pane); }
+  return wrap;
+}
+// strips are narrow, so label with the folder basename rather than the full path.
+// pane.cwd is a cache written by syncProjectDir, by collapsePane (Task 4), and
+// seeded from the restore/split cwd argument in createLeafPane — resolving it
+// here is impossible, since pty_cwd is async and this runs mid-render.
+function stripLabel(paneId) {
+  const cwd = panes.get(paneId)?.cwd;
+  const base = cwd ? cwd.replace(/(.)\/+$/, "$1").split("/").pop() : "";
+  return base || "terminal";
+}
+function renderNode(node, parentDir) {
+  if (isLeafNode(node)) {
+    if (node.collapsed) return renderCollapsed(node, parentDir || "col");
+    const pane = panes.get(node.paneId)?.el;
+    if (pane) pane.style.display = "";        // undo a previous collapse
+    return pane || el("div", "term-pane");
+  }
   const box = el("div", "split split-" + node.dir);
-  const ca = renderNode(node.a); ca.style.flex = node.sizeA + " 1 0";
-  const cb = renderNode(node.b); cb.style.flex = (1 - node.sizeA) + " 1 0";
-  box.append(ca, makeDivider(node, box, ca, cb), cb);
+  const ca = renderNode(node.a, node.dir);
+  const cb = renderNode(node.b, node.dir);
+  // a collapsed side is fixed at the strip thickness; the sibling takes the rest.
+  // node.sizeA is deliberately left untouched so the old ratio returns on restore.
+  const aOff = isLeafNode(node.a) && node.a.collapsed;
+  const bOff = isLeafNode(node.b) && node.b.collapsed;
+  ca.style.flex = aOff ? "0 0 26px" : bOff ? "1 1 0" : node.sizeA + " 1 0";
+  cb.style.flex = bOff ? "0 0 26px" : aOff ? "1 1 0" : (1 - node.sizeA) + " 1 0";
+  box.append(ca, makeDivider(node, box, ca, cb, aOff || bOff), cb);
   return box;
 }
 // rebuild a tab's DOM from its tree (pane wraps are moved, not recreated)
@@ -828,8 +952,9 @@ function layoutTab(tab) {
   requestAnimationFrame(() => fitTab(tab));
 }
 // draggable splitter between the two children of a split
-function makeDivider(node, box, elA, elB) {
-  const d = el("div", "divider divider-" + node.dir);
+function makeDivider(node, box, elA, elB, inert) {
+  const d = el("div", "divider divider-" + node.dir + (inert ? " divider-inert" : ""));
+  if (inert) return d;                        // nothing to drag against a fixed-width strip
   d.addEventListener("mousedown", (e) => {
     e.preventDefault(); e.stopPropagation();
     const horiz = node.dir === "row";
@@ -914,6 +1039,45 @@ async function closeLeaf(paneId) {
 }
 
 // right-click a terminal pane → split / close
+// collapse a split pane to a strip; its shell keeps running behind the strip
+async function collapsePane(paneId) {
+  const tab = tabs.get(panes.get(paneId)?.tabId);
+  if (!tab || !canCollapse(tab.root, paneId)) return;
+  // syncProjectDir only ever caches cwd for the ACTIVE pane, and collapsing moves
+  // focus away — so resolve this pane's folder now, while we still can, or the
+  // strip would be stuck reading "terminal".
+  const p = panes.get(paneId);
+  const cwd = await invoke("pty_cwd", { id: paneId }).catch(() => null);
+  if (p && cwd) p.cwd = cwd;
+  setCollapsed(tab.root, paneId, true);
+  // never leave focus on a hidden terminal — keystrokes would vanish into it
+  let next = null;
+  if (tab.activeLeaf === paneId) {
+    next = nextFocusAfterCollapse(tab.root, paneId);
+    if (next) {
+      tab.activeLeaf = next;
+      // the await above may have let the user switch tabs — only touch the
+      // global activeId/focus if this tab is still the one on screen, or we'd
+      // steal focus from whatever tab the user is actually looking at
+      if (tab.id === activeTab) activeId = next;
+    }
+  }
+  layoutTab(tab);
+  markActiveLeaf();
+  if (next && tab.id === activeTab) panes.get(next)?.term?.focus();
+  scheduleSave();
+}
+function restorePane(paneId) {
+  const tab = tabs.get(panes.get(paneId)?.tabId);
+  if (!tab) return;
+  setCollapsed(tab.root, paneId, false);
+  tab.activeLeaf = paneId;
+  activeId = paneId;
+  layoutTab(tab);
+  markActiveLeaf();
+  panes.get(paneId)?.term?.focus();
+  scheduleSave();
+}
 function openPaneMenu(x, y, paneId) {
   const menu = $("#ctx");
   menu.innerHTML = "";
@@ -926,6 +1090,8 @@ function openPaneMenu(x, y, paneId) {
   };
   item("▐", "Split right", () => splitLeaf(paneId, "row"));
   item("▄", "Split down", () => splitLeaf(paneId, "col"));
+  item("▁", "Collapse pane", () => collapsePane(paneId),
+       !canCollapse(tabs.get(panes.get(paneId)?.tabId)?.root, paneId));
   // move this pane elsewhere (menu fallback for the grip drag)
   const srcTab = tabs.get(panes.get(paneId)?.tabId);
   const split = srcTab && tabLeafIds(srcTab).length > 1;
@@ -964,9 +1130,9 @@ function createTabShell(name) {
   tabs.set(id, tab);
   return tab;
 }
-function createTab(name) {
+function createTab(name, cwd) {
   const tab = createTabShell(name);
-  const pane = createLeafPane(tab.id);
+  const pane = createLeafPane(tab.id, cwd);
   tab.root = { paneId: pane.id };
   tab.activeLeaf = pane.id;
   layoutTab(tab);
@@ -981,14 +1147,14 @@ function refitAll() {
 // ── session persistence: restore tabs/splits/folders on reopen ────────
 // leaf → { cwd, claude }   split → { dir, sizeA, a, b }
 async function serializeNode(node) {
-  if (!isLeaf(node)) {
+  if (!isLeafNode(node)) {
     return { dir: node.dir, sizeA: node.sizeA, a: await serializeNode(node.a), b: await serializeNode(node.b) };
   }
   const [cwd, claude] = await Promise.all([
     invoke("pty_cwd", { id: node.paneId }).catch(() => null),
     invoke("pty_has_claude", { id: node.paneId }).catch(() => false),
   ]);
-  return { cwd: cwd || null, claude: !!claude };
+  return { cwd: cwd || null, claude: !!claude, collapsed: !!node.collapsed };
 }
 async function saveLayout() {
   try {
@@ -1008,7 +1174,7 @@ function buildSaved(tabId, node, claudePanes) {
   }
   const pane = createLeafPane(tabId, node && node.cwd);
   if (node && node.claude) claudePanes.push(pane.id);
-  return { paneId: pane.id };
+  return node && node.collapsed ? { paneId: pane.id, collapsed: true } : { paneId: pane.id };
 }
 function restoreTab(saved) {
   const id = nextTabId();
@@ -1022,7 +1188,8 @@ function restoreTab(saved) {
   tabs.set(id, tab);
   const claudePanes = [];
   tab.root = buildSaved(tab.id, saved.root, claudePanes);
-  tab.activeLeaf = tabLeafIds(tab)[0];
+  // a restored tab must not focus a pane that came back collapsed
+  tab.activeLeaf = visibleLeafIds(tab.root)[0] || tabLeafIds(tab)[0];
   layoutTab(tab);
   // resume Claude after the shell has settled (best-effort)
   for (const pid of claudePanes) {
@@ -1199,6 +1366,7 @@ async function enhanceActive() {
 // ---------- context menu (right-click a pane, or the Split button) ----------
 let menuOnClose = null;
 function closeMenu() {
+  addMenuToken++; // invalidate any ▾ build still in flight so it can't pop the menu open after this dismiss
   $("#ctx").classList.add("hidden");
   const f = menuOnClose;
   menuOnClose = null;
@@ -2110,6 +2278,21 @@ function refreshActivePanel() {
   const which = document.querySelector(".panel-tabs .tab.active")?.dataset.tab;
   if (which) loadPane(which);
 }
+// ---------- recent folders ----------
+const RECENTS_KEY = "devcli-recent-folders";
+function loadRecents() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(RECENTS_KEY) || "[]");
+    return Array.isArray(raw) ? raw.filter((p) => typeof p === "string") : [];
+  } catch (_) { return []; }
+}
+function rememberFolder(path) {
+  const next = addRecent(loadRecents(), path);
+  try { localStorage.setItem(RECENTS_KEY, JSON.stringify(next)); } catch (_) {}
+}
+function clearRecents() {
+  try { localStorage.removeItem(RECENTS_KEY); } catch (_) {}
+}
 async function syncProjectDir() {
   // The interval fires every tick and each run spawns lsof + ps + git. That's
   // pure waste when the app is backgrounded or unfocused, and it made the whole
@@ -2117,6 +2300,8 @@ async function syncProjectDir() {
   if (document.hidden || !document.hasFocus()) return;
   const cwd = await invoke("pty_cwd", { id: activeId }).catch(() => null);
   if (!cwd) return;
+  const activePane = panes.get(activeId);
+  if (activePane) activePane.cwd = cwd;
   const base = cwd.split("/").filter(Boolean).pop() || cwd;
   // one claude-detect per tick, shared by the tab-name logic and the chips
   // (was two separate `ps` scans of the whole process table).
@@ -2128,6 +2313,7 @@ async function syncProjectDir() {
   if (cwd !== currentDir) {
     currentDir = cwd;
     await invoke("set_project_dir", { path: cwd }).catch(() => {});
+    rememberFolder(cwd);   // any folder a terminal sits in becomes a recent
     $("#cwd-label").textContent = "📁 " + base;
     $("#cwd-label").title = cwd + " — the panel follows this folder";
     $("#sb-folder-name").textContent = base;
@@ -2208,6 +2394,24 @@ async function init() {
   $("#compose-input").addEventListener("input", () => autoGrow($("#compose-input")));
   $("#btn-theme").addEventListener("click", () => setTheme(currentTheme === "light" ? "dark" : "light"));
   $("#tab-add").addEventListener("click", newTab);
+  $("#tab-add-menu").addEventListener("click", (e) => {
+    e.stopPropagation();
+    const r = e.currentTarget.getBoundingClientRect();
+    openAddMenu(r.left, r.bottom + 4);
+  });
+  // strips are rebuilt on every layout, so listen on the container instead
+  $("#terms").addEventListener("click", (e) => {
+    const strip = e.target.closest?.(".pane-collapsed");
+    if (strip) restorePane(strip.dataset.id);
+  });
+  // spec: "click = restore, right-click = normal pane menu" — the wrap's own
+  // contextmenu listener (bound in createLeafPane) never fires here because the
+  // pane element is display:none while collapsed, so the strip needs its own
+  // delegated handler (review Finding 3).
+  $("#terms").addEventListener("contextmenu", (e) => {
+    const strip = e.target.closest?.(".pane-collapsed");
+    if (strip) { e.preventDefault(); openPaneMenu(e.clientX, e.clientY, strip.dataset.id); }
+  });
   $("#btn-collapse").addEventListener("click", () => setPanel(false));
   $("#panel-reopen").addEventListener("click", () => setPanel(true));
 
@@ -2233,6 +2437,7 @@ async function init() {
       if (t?.hasSelection()) { e.preventDefault(); copyText(selectionGrid(t)).then((ok) => ok && status("copied")); }
     }
     else if (k === "t") { e.preventDefault(); newTab(); }
+    else if (k === "o" && e.shiftKey) { e.preventDefault(); pickFolder(); }
     else if (k === "e") { e.preventDefault(); enhanceActive(); }
     else if (k === "b") { e.preventDefault(); setPanel($("#panel").classList.contains("hidden")); }
     else if (k === "w") { e.preventDefault(); closeLeaf(activeId); }

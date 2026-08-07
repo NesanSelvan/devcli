@@ -826,3 +826,30 @@ body.filepanel-resizing { cursor: col-resize !important; user-select: none; }
 
 /* current-folder label in the top bar (panel follows this folder) */
 .cwd-label { flex: 0 0 auto; font-size: 11px; color: var(--text-dim); font-family: var(--font-mono); white-space: nowrap; max-width: 220px; overflow: hidden; text-overflow: ellipsis; padding: 0 6px; }
+
+/* a collapsed pane: thin clickable strip, its terminal hidden but still mounted */
+.pane-collapsed { display: flex; overflow: hidden; min-width: 0; min-height: 0; }
+.pane-strip {
+  display: flex; align-items: center; gap: 6px;
+  background: var(--bg-panel); color: var(--text-dim);
+  font-size: 11px; cursor: pointer; user-select: none;
+  transition: background 120ms ease, color 120ms ease;
+}
+.pane-strip:hover { background: var(--bg-elev); color: var(--text); }
+/* stacked split -> full-width bar, text reads normally */
+.pane-collapsed-col { flex-direction: column; }
+.pane-collapsed-col .pane-strip { width: 100%; height: 26px; padding: 0 10px; }
+/* side-by-side split -> narrow column, text rotated a quarter turn */
+.pane-collapsed-row { flex-direction: row; }
+.pane-collapsed-row .pane-strip {
+  width: 26px; height: 100%; flex-direction: column; padding: 10px 0;
+}
+.pane-collapsed-row .pane-strip-label { writing-mode: vertical-rl; }
+.pane-strip-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pane-strip-chevron { flex: 0 0 auto; font-size: 9px; }
+
+/* ▾ folder-open dropdown, next to ＋ */
+.tab-add-menu { font-size: 9px; padding: 0 4px; opacity: .7; }
+.tab-add-menu:hover { opacity: 1; }
+.ctx-head { padding: 4px 10px 2px; font-size: 9px; letter-spacing: .08em; color: var(--text-dim); }
+.divider-inert { pointer-events: none; opacity: .4; }

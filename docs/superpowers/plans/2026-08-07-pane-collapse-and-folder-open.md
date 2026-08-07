@@ -16,6 +16,8 @@
 - Recents cap is exactly 15 entries, deduplicated, most-recent-first.
 - localStorage keys: layout stays `devcli-layout`; recents is `devcli-recent-folders`.
 - Never resize a PTY to 0 rows/cols — `fitTab` must skip collapsed panes.
+- The pane object is `{ id, term, fit, search, draft, el, tabId, kittyKbd }` (`src/main.js:553`). It has **no** `cwd` — this plan adds `pane.cwd` as a write-through cache (Task 4 and Task 8 populate it); a pane's real folder is only knowable via the async `invoke("pty_cwd", { id })`.
+- After Task 2, tree primitives live only in `src/split-tree.js`. `main.js` must not redefine `isLeaf` or `leafIds`.
 - Existing code style: 2-space indent, double quotes, no semicolon-free lines, comments explain *why*. Match it.
 - The app has no test framework before Task 1. Do not add any framework other than `vitest`.
 
@@ -245,13 +247,26 @@ git commit -m "test: add vitest and pure split-tree collapse logic"
 - Consumes: `isLeafNode`, `findLeaf` from `src/split-tree.js` (Task 1)
 - Produces: `.pane-collapsed` wrapper elements carrying `data-id="<paneId>"`, and a `stripLabel(paneId) -> string` helper used by Task 4's restore handler
 
-- [ ] **Step 1: Import the tree helpers**
+- [ ] **Step 1: Import the tree helpers and retire the local duplicates**
 
-At the top of `src/main.js`, after the existing imports (`src/main.js:12`), add:
+`src/split-tree.js` now owns the tree primitives, so `main.js` must stop defining its
+own. At the top of `src/main.js`, after the existing imports (`src/main.js:12`), add:
 
 ```js
-import { canCollapse, findLeaf, nextFocusAfterCollapse, setCollapsed, visibleLeafIds } from "./split-tree.js";
+import {
+  canCollapse, isLeafNode, leafIdsOf, nextFocusAfterCollapse, setCollapsed, visibleLeafIds,
+} from "./split-tree.js";
 ```
+
+Then delete `isLeaf` and `leafIds` (`src/main.js:170-171`) and rewrite `tabLeafIds`:
+
+```js
+const tabLeafIds = (tab) => (tab?.root ? leafIdsOf(tab.root) : []);
+```
+
+Update the five remaining `isLeaf(` call sites to `isLeafNode(` — `src/main.js:175`,
+`:182`, `:683`, `:814`, `:984`. (`:814` is inside `renderNode`, which Step 3 rewrites
+wholesale; the other four are one-word edits.)
 
 - [ ] **Step 2: Add the strip renderer**
 
@@ -272,10 +287,12 @@ function renderCollapsed(node, dir) {
   if (pane) { pane.style.display = "none"; wrap.appendChild(pane); }
   return wrap;
 }
-// strips are narrow, so label with the folder basename rather than the full path
+// strips are narrow, so label with the folder basename rather than the full path.
+// pane.cwd is a cache written by syncProjectDir and by collapsePane (Task 4) —
+// resolving it here is impossible, since pty_cwd is async and this runs mid-render.
 function stripLabel(paneId) {
   const cwd = panes.get(paneId)?.cwd;
-  const base = cwd ? cwd.replace(/\/+$/, "").split("/").pop() : "";
+  const base = cwd ? cwd.replace(/(.)\/+$/, "$1").split("/").pop() : "";
   return base || "terminal";
 }
 ```
@@ -422,8 +439,8 @@ git commit -m "fix: never fit or resize a collapsed pane's PTY"
 - Modify: `src/main.js` — new `collapsePane` / `restorePane`, and a click handler on `#terms`
 
 **Interfaces:**
-- Consumes: `canCollapse`, `setCollapsed`, `nextFocusAfterCollapse` from `src/split-tree.js`; `layoutTab` (`src/main.js:822`); `focusPane` (existing pane-focus helper in `main.js` — if it is named differently, use whatever `markActiveLeaf` pairs with)
-- Produces: `collapsePane(paneId)`, `restorePane(paneId)`
+- Consumes: `canCollapse`, `setCollapsed`, `nextFocusAfterCollapse` from `src/split-tree.js`; `layoutTab` (`src/main.js:822`); `markActiveLeaf` (`src/main.js:252`); the module-level `activeId` and `activeTab` variables. There is no `focusPane` helper — focusing a pane is `panes.get(id)?.term?.focus()`, and the outline follows from setting `activeId` then calling `markActiveLeaf()`.
+- Produces: `collapsePane(paneId)` (async — it awaits `pty_cwd`), `restorePane(paneId)`
 
 - [ ] **Step 1: Add collapse/restore**
 
@@ -431,9 +448,15 @@ Insert directly above `openPaneMenu` (`src/main.js:917`):
 
 ```js
 // collapse a split pane to a strip; its shell keeps running behind the strip
-function collapsePane(paneId) {
+async function collapsePane(paneId) {
   const tab = tabs.get(panes.get(paneId)?.tabId);
   if (!tab || !canCollapse(tab.root, paneId)) return;
+  // syncProjectDir only ever caches cwd for the ACTIVE pane, and collapsing moves
+  // focus away — so resolve this pane's folder now, while we still can, or the
+  // strip would be stuck reading "terminal".
+  const p = panes.get(paneId);
+  const cwd = await invoke("pty_cwd", { id: paneId }).catch(() => null);
+  if (p && cwd) p.cwd = cwd;
   setCollapsed(tab.root, paneId, true);
   // never leave focus on a hidden terminal — keystrokes would vanish into it
   if (tab.activeLeaf === paneId) {
@@ -793,12 +816,21 @@ Extend the Task 2 import block at the top of `src/main.js`:
 import { addRecent, shortenHome, splitPath } from "./recent-folders.js";
 ```
 
-- [ ] **Step 3: Record on every folder change**
+- [ ] **Step 3: Record on every folder change, and cache cwd on the pane**
 
 In `syncProjectDir`, immediately after the `set_project_dir` invoke (`src/main.js:2130`), add:
 
 ```js
     rememberFolder(cwd);   // any folder a terminal sits in becomes a recent
+```
+
+Separately, right after `syncProjectDir` resolves `cwd` (`src/main.js:2117`, the
+`if (!cwd) return;` line), cache it on the pane so the collapse strip in Task 2 has a
+label to read:
+
+```js
+  const activePane = panes.get(activeId);
+  if (activePane) activePane.cwd = cwd;
 ```
 
 - [ ] **Step 4: Verify the build is clean**
@@ -959,11 +991,16 @@ Next to the existing ＋ handler (`src/main.js:2210`):
   });
 ```
 
-In the existing global keydown handler, add:
+In the global shortcut handler (`src/main.js:2218`), which has already destructured
+`mod` and `k`, add a branch in the existing `else if` chain — put it next to the `k === "t"`
+branch so the two tab-opening shortcuts sit together:
 
 ```js
-    if (e.metaKey && e.shiftKey && (e.key === "o" || e.key === "O")) { e.preventDefault(); pickFolder(); return; }
+    else if (k === "o" && e.shiftKey) { e.preventDefault(); pickFolder(); }
 ```
+
+Note the house pattern: this chain runs only when `mod` is set, tests a lowercased `k`,
+and does not `return` — match it rather than adding a standalone `if`.
 
 - [ ] **Step 7: Style the menu additions**
 
