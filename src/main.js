@@ -407,13 +407,15 @@ function startTabDrag(id, e0) {
     const p = acted ? paneUnder(e.clientX, e.clientY) : null;
     const into = acted ? bar.querySelector(".term-tab.drop-into") : null;
     const slot = acted ? bar.querySelector(".drop-before, .drop-after") : null;
+    // read the side NOW — finish() clears the marker classes off `slot`
+    const before = !!slot?.classList.contains("drop-before");
     finish();
     if (!acted) return;
     if (p) mergeTabIntoPane(id, p.dataset.id, dropSide(p, e.clientX, e.clientY));
     else if (into) {
       const dst = tabs.get(into.dataset.id);
       if (dst) mergeTabIntoPane(id, dst.activeLeaf || tabLeafIds(dst)[0], "right");
-    } else if (slot) reorderTabs(id, slot.dataset.id, slot.classList.contains("drop-before"));
+    } else if (slot) reorderTabs(id, slot.dataset.id, before);
   };
   window.addEventListener("mousemove", onMove);
   window.addEventListener("mouseup", onUp);
