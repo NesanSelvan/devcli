@@ -33,6 +33,12 @@ describe("addRecent", () => {
     addRecent(list, "/b");
     expect(list).toEqual(["/a"]);
   });
+
+  it("returns a new array even when rejecting an invalid path", () => {
+    const list = ["/a"];
+    const result = addRecent(list, "");
+    expect(result).not.toBe(list);
+  });
 });
 
 describe("shortenHome", () => {
