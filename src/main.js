@@ -242,7 +242,9 @@ function showActive() {
 }
 // fit + resize every leaf terminal of a tab (call after layout / resize)
 function fitTab(tab) {
-  for (const id of tabLeafIds(tab)) {
+  // Collapsed panes are display:none, so fit() would measure 0 and we'd resize the
+  // PTY to 0x0 — that wrecks the shell's line editing. Only fit what's on screen.
+  for (const id of visibleLeafIds(tab?.root)) {
     const p = panes.get(id);
     if (!p) continue;
     try { p.fit.fit(); } catch (_) {}
@@ -251,7 +253,7 @@ function fitTab(tab) {
 }
 // outline the focused leaf when a tab is split into more than one pane
 function markActiveLeaf() {
-  const multi = tabLeafIds(tabs.get(activeTab)).length > 1;
+  const multi = visibleLeafIds(tabs.get(activeTab)?.root).length > 1;
   for (const [id, p] of panes) {
     p.el.classList.toggle("multi", multi && p.tabId === activeTab);
     p.el.classList.toggle("active", multi && id === activeId);
