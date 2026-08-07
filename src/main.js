@@ -963,12 +963,20 @@ async function collapsePane(paneId) {
   if (p && cwd) p.cwd = cwd;
   setCollapsed(tab.root, paneId, true);
   // never leave focus on a hidden terminal — keystrokes would vanish into it
+  let next = null;
   if (tab.activeLeaf === paneId) {
-    const next = nextFocusAfterCollapse(tab.root, paneId);
-    if (next) { tab.activeLeaf = next; activeId = next; }
+    next = nextFocusAfterCollapse(tab.root, paneId);
+    if (next) {
+      tab.activeLeaf = next;
+      // the await above may have let the user switch tabs — only touch the
+      // global activeId/focus if this tab is still the one on screen, or we'd
+      // steal focus from whatever tab the user is actually looking at
+      if (tab.id === activeTab) activeId = next;
+    }
   }
   layoutTab(tab);
   markActiveLeaf();
+  if (next && tab.id === activeTab) panes.get(next)?.term?.focus();
   scheduleSave();
 }
 function restorePane(paneId) {
