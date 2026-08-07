@@ -10,6 +10,7 @@ use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::sync::Mutex;
+use std::sync::OnceLock;
 use std::thread;
 
 use base64::Engine;
@@ -675,7 +676,7 @@ fn build_meta(draft: &str, base: Option<&str>, kind: &str) -> String {
     }
 }
 
-/// Keep only shell-safe chars so the model name can't inject into the `-lc` string.
+/// Keep only sane chars so a stray model name can't turn into extra claude flags.
 fn safe_model(model: Option<&str>) -> Option<String> {
     let m: String = model?
         .chars()
@@ -684,20 +685,62 @@ fn safe_model(model: Option<&str>) -> Option<String> {
     if m.is_empty() { None } else { Some(m) }
 }
 
+/// Absolute path to the user's `claude` CLI, resolved once per app run.
+///
+/// A GUI-launched app inherits launchd's bare PATH (/usr/bin:/bin:/usr/sbin:/sbin),
+/// and `$SHELL -lc` only sources the *login* files (~/.zprofile) — most installers
+/// put `claude` on PATH from ~/.zshrc, which is *interactive*-only. So a login
+/// non-interactive shell reports "command not found: claude" even though the same
+/// binary runs fine in a terminal pane (that PTY shell IS interactive).
+/// Look in the usual install dirs first, then fall back to asking a login+interactive
+/// shell where it is.
+fn claude_bin() -> Option<&'static PathBuf> {
+    static BIN: OnceLock<Option<PathBuf>> = OnceLock::new();
+    BIN.get_or_init(|| {
+        let home = dirs::home_dir();
+        let candidates = [
+            home.as_ref().map(|h| h.join(".local/bin/claude")),
+            home.as_ref().map(|h| h.join(".claude/local/claude")),
+            home.as_ref().map(|h| h.join(".bun/bin/claude")),
+            Some(PathBuf::from("/opt/homebrew/bin/claude")),
+            Some(PathBuf::from("/usr/local/bin/claude")),
+        ];
+        if let Some(p) = candidates.into_iter().flatten().find(|p| p.is_file()) {
+            return Some(p);
+        }
+        // last resort: let the user's real (interactive) shell resolve it
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
+        let out = std::process::Command::new(shell)
+            .arg("-lic")
+            .arg("command -v claude")
+            .output()
+            .ok()?;
+        // an interactive rc can print banners — take the last line that is a real file
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .rev()
+            .map(|l| PathBuf::from(l.trim()))
+            .find(|p| p.is_file())
+    })
+    .as_ref()
+}
+
 /// Blocking claude call with a watchdog timeout. Runs off the UI thread.
 /// `model` is a `claude` alias ("haiku" / "sonnet" / "opus") or a full model id;
 /// None uses the CLI's default. Enhance runs in plain print mode (no think keywords)
 /// so it stays low-latency — "low thinking" by construction.
 fn run_claude(meta: &str, model: Option<&str>) -> Result<String, String> {
     use std::time::{Duration, Instant};
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
-    let cmd = match safe_model(model) {
-        Some(m) => format!("claude -p --model {m}"),
-        None => "claude -p".to_string(),
-    };
-    let mut child = std::process::Command::new(&shell)
-        .arg("-lc")
-        .arg(&cmd)
+    let bin = claude_bin().ok_or(
+        "claude CLI not found — install it (npm i -g @anthropic-ai/claude-code) or make sure \
+         `claude` is on PATH from ~/.zprofile, not only ~/.zshrc",
+    )?;
+    let mut command = std::process::Command::new(bin);
+    command.arg("-p");
+    if let Some(m) = safe_model(model) {
+        command.args(["--model", &m]);
+    }
+    let mut child = command
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
