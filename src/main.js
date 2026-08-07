@@ -182,14 +182,31 @@ function replaceLeaf(node, paneId, repl) {
   return node;
 }
 // drop the leaf carrying paneId; a split with one survivor collapses to it
-function removeLeaf(node, paneId) {
+function removeLeafRec(node, paneId) {
   if (isLeafNode(node)) return node.paneId === paneId ? null : node;
-  const a = removeLeaf(node.a, paneId);
-  const b = removeLeaf(node.b, paneId);
+  const a = removeLeafRec(node.a, paneId);
+  const b = removeLeafRec(node.b, paneId);
   if (!a) return b;
   if (!b) return a;
   node.a = a; node.b = b;
   return node;
+}
+// every call site below passes a tab's full root, so this outer wrapper is the
+// one place that sees the WHOLE resulting tree. Checking visibility inside
+// removeLeafRec's own survivor branch was tried and rejected: mid-recursion it
+// only sees the subtree at the immediate parent of the removed leaf, so it can
+// misfire — forcing a collapsed sibling back open even though some unrelated,
+// already-visible leaf survives elsewhere in the tree. Checking once here, on
+// the final root, avoids that false positive while still fixing the real bug:
+// a tab whose only remaining leaves are all collapsed would focus a hidden
+// (display:none) terminal and swallow every keystroke (review Finding 1).
+function removeLeaf(node, paneId) {
+  const result = removeLeafRec(node, paneId);
+  if (result && visibleLeafIds(result).length === 0) {
+    const id = leafIdsOf(result)[0];
+    if (id != null) setCollapsed(result, id, false);
+  }
+  return result;
 }
 
 let fontSize = Math.max(8, Math.min(28, parseInt(localStorage.getItem("devcli-fontsize") || "13", 10) || 13));
@@ -618,6 +635,12 @@ function createLeafPane(tabId, cwd) {
   }, { capture: true, passive: false });
 
   const pane = { id, term, fit, search, draft: "", el: wrap, tabId, kittyKbd: false };
+  // seed a starting-folder hint from the caller (session restore passes the saved
+  // cwd) so a strip doesn't read "terminal" if this pane comes back collapsed and
+  // never becomes active — syncProjectDir only caches cwd for the active pane, so
+  // without this the cache would stay empty forever. Just a hint: the live value
+  // still comes from pty_cwd via syncProjectDir / collapsePane, which overwrite it.
+  if (cwd) pane.cwd = cwd;
   panes.set(id, pane);
 
   // Claude Code sets the terminal title (OSC 0/2) to the session's summary.
@@ -892,8 +915,9 @@ function renderCollapsed(node, dir) {
   return wrap;
 }
 // strips are narrow, so label with the folder basename rather than the full path.
-// pane.cwd is a cache written by syncProjectDir and by collapsePane (Task 4) —
-// resolving it here is impossible, since pty_cwd is async and this runs mid-render.
+// pane.cwd is a cache written by syncProjectDir, by collapsePane (Task 4), and
+// seeded from the restore/split cwd argument in createLeafPane — resolving it
+// here is impossible, since pty_cwd is async and this runs mid-render.
 function stripLabel(paneId) {
   const cwd = panes.get(paneId)?.cwd;
   const base = cwd ? cwd.replace(/(.)\/+$/, "$1").split("/").pop() : "";
@@ -2379,6 +2403,14 @@ async function init() {
   $("#terms").addEventListener("click", (e) => {
     const strip = e.target.closest?.(".pane-collapsed");
     if (strip) restorePane(strip.dataset.id);
+  });
+  // spec: "click = restore, right-click = normal pane menu" — the wrap's own
+  // contextmenu listener (bound in createLeafPane) never fires here because the
+  // pane element is display:none while collapsed, so the strip needs its own
+  // delegated handler (review Finding 3).
+  $("#terms").addEventListener("contextmenu", (e) => {
+    const strip = e.target.closest?.(".pane-collapsed");
+    if (strip) { e.preventDefault(); openPaneMenu(e.clientX, e.clientY, strip.dataset.id); }
   });
   $("#btn-collapse").addEventListener("click", () => setPanel(false));
   $("#panel-reopen").addEventListener("click", () => setPanel(true));
