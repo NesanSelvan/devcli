@@ -13,6 +13,7 @@ import hljs from "highlight.js/lib/common";
 import {
   canCollapse, isLeafNode, leafIdsOf, nextFocusAfterCollapse, setCollapsed, visibleLeafIds,
 } from "./split-tree.js";
+import { addRecent, shortenHome, splitPath } from "./recent-folders.js";
 
 // ---------- DOM helpers ----------
 const $ = (s) => document.querySelector(s);
@@ -2189,6 +2190,21 @@ function refreshActivePanel() {
   const which = document.querySelector(".panel-tabs .tab.active")?.dataset.tab;
   if (which) loadPane(which);
 }
+// ---------- recent folders ----------
+const RECENTS_KEY = "devcli-recent-folders";
+function loadRecents() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(RECENTS_KEY) || "[]");
+    return Array.isArray(raw) ? raw.filter((p) => typeof p === "string") : [];
+  } catch (_) { return []; }
+}
+function rememberFolder(path) {
+  const next = addRecent(loadRecents(), path);
+  try { localStorage.setItem(RECENTS_KEY, JSON.stringify(next)); } catch (_) {}
+}
+function clearRecents() {
+  try { localStorage.removeItem(RECENTS_KEY); } catch (_) {}
+}
 async function syncProjectDir() {
   // The interval fires every tick and each run spawns lsof + ps + git. That's
   // pure waste when the app is backgrounded or unfocused, and it made the whole
@@ -2196,6 +2212,8 @@ async function syncProjectDir() {
   if (document.hidden || !document.hasFocus()) return;
   const cwd = await invoke("pty_cwd", { id: activeId }).catch(() => null);
   if (!cwd) return;
+  const activePane = panes.get(activeId);
+  if (activePane) activePane.cwd = cwd;
   const base = cwd.split("/").filter(Boolean).pop() || cwd;
   // one claude-detect per tick, shared by the tab-name logic and the chips
   // (was two separate `ps` scans of the whole process table).
@@ -2207,6 +2225,7 @@ async function syncProjectDir() {
   if (cwd !== currentDir) {
     currentDir = cwd;
     await invoke("set_project_dir", { path: cwd }).catch(() => {});
+    rememberFolder(cwd);   // any folder a terminal sits in becomes a recent
     $("#cwd-label").textContent = "📁 " + base;
     $("#cwd-label").title = cwd + " — the panel follows this folder";
     $("#sb-folder-name").textContent = base;
