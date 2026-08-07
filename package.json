@@ -9,11 +9,13 @@
     "build": "vite build",
     "tauri": "tauri",
     "app:dev": "tauri dev",
-    "app:build": "tauri build"
+    "app:build": "tauri build",
+    "test": "vitest run"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2",
-    "vite": "^5"
+    "vite": "^5",
+    "vitest": "^3.2.7"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
