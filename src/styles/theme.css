@@ -847,4 +847,9 @@ body.filepanel-resizing { cursor: col-resize !important; user-select: none; }
 .pane-collapsed-row .pane-strip-label { writing-mode: vertical-rl; }
 .pane-strip-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pane-strip-chevron { flex: 0 0 auto; font-size: 9px; }
+
+/* ▾ folder-open dropdown, next to ＋ */
+.tab-add-menu { font-size: 9px; padding: 0 4px; opacity: .7; }
+.tab-add-menu:hover { opacity: 1; }
+.ctx-head { padding: 4px 10px 2px; font-size: 9px; letter-spacing: .08em; color: var(--text-dim); }
 .divider-inert { pointer-events: none; opacity: .4; }

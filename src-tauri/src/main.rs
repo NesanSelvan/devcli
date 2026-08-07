@@ -358,6 +358,12 @@ fn set_project_dir(state: State<'_, AppState>, path: String) {
     }
 }
 
+/// Cheap existence check so the recents menu can hide folders that went away.
+#[tauri::command]
+fn path_is_dir(path: String) -> bool {
+    std::path::Path::new(&path).is_dir()
+}
+
 // ---- prompts (dual scope: project + global) ----
 
 #[tauri::command]
@@ -817,6 +823,7 @@ fn main() {
             pty_busy,
             git_branch,
             set_project_dir,
+            path_is_dir,
             prompts_search,
             prompts_get,
             prompts_save,

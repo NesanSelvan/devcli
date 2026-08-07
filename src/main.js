@@ -10,6 +10,8 @@ import { check } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import hljs from "highlight.js/lib/common";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { homeDir } from "@tauri-apps/api/path";
 import {
   canCollapse, isLeafNode, leafIdsOf, nextFocusAfterCollapse, setCollapsed, visibleLeafIds,
 } from "./split-tree.js";
@@ -278,13 +280,62 @@ function reorderTabs(draggedId, targetId, before) {
   renderTermTabs();
   saveLayout(); // persist the new order now (not debounced) so it survives a quick quit
 }
+// open a folder in a NEW tab (not a split) — the tab self-names from the folder
+async function openFolderInNewTab(path) {
+  if (!path) return;
+  rememberFolder(path);
+  const tab = createTab(null, path);
+  activeTab = tab.id;
+  showActive();
+  scheduleSave();
+}
+async function pickFolder() {
+  const picked = await openDialog({ directory: true, multiple: false }).catch(() => null);
+  if (typeof picked === "string") await openFolderInNewTab(picked);
+}
+// ▾ next to ＋: open-folder plus the recent list
+async function openAddMenu(x, y) {
+  const menu = $("#ctx");
+  menu.innerHTML = "";
+  const item = (glyph, label, fn, hint) => {
+    const r = el("div", "ctx-item");
+    r.appendChild(el("span", "ctx-glyph", glyph || ""));
+    r.appendChild(el("span", null, label));
+    if (hint) r.appendChild(el("span", "k", hint));
+    r.addEventListener("click", () => { closeMenu(); fn(); });
+    menu.appendChild(r);
+  };
+  item("📂", "Open folder…", pickFolder, "⌘⇧O");
+  const home = await homeDir().catch(() => "");
+  // a folder can be deleted or unmounted after we recorded it — filter at render
+  // time rather than pruning the store, so a temporary absence isn't permanent
+  const recents = [];
+  for (const p of loadRecents()) {
+    if (await invoke("path_is_dir", { path: p }).catch(() => false)) recents.push(p);
+  }
+  if (recents.length) {
+    menu.appendChild(el("div", "ctx-sep"));
+    menu.appendChild(el("div", "ctx-head", "RECENT"));
+    for (const p of recents) {
+      const { base, parent } = splitPath(p);
+      item("", base, () => openFolderInNewTab(p), shortenHome(parent, home.replace(/\/+$/, "")));
+    }
+    menu.appendChild(el("div", "ctx-sep"));
+    item("", "Clear recents", clearRecents);
+  }
+  menu.classList.remove("hidden");
+  const mw = 260, mh = menu.offsetHeight || 160;
+  menu.style.left = Math.min(x, window.innerWidth - mw - 8) + "px";
+  menu.style.top = Math.min(y, window.innerHeight - mh - 8) + "px";
+}
 // top bar: one tab per terminal — rename, pin, color, close, drag-to-reorder
 function renderTermTabs() {
   const bar = $("#term-tabs");
   if (!bar) return;
-  // grab ＋ BEFORE clearing — it lives inside the row, so innerHTML="" would
-  // destroy it (holding a ref keeps the element alive)
+  // grab ＋ / ▾ BEFORE clearing — they live inside the row, so innerHTML="" would
+  // destroy them (holding a ref keeps the elements alive)
   const addBtn = $("#tab-add");
+  const addMenuBtn = $("#tab-add-menu");
   bar.innerHTML = "";
   for (const p of orderedTabs()) {
     const nLeaves = tabLeafIds(p).length;
@@ -312,9 +363,10 @@ function renderTermTabs() {
     });
     bar.appendChild(tab);
   }
-  // keep ＋ right after the last tab; the empty tab-row space after it is a
+  // keep ＋ / ▾ right after the last tab; the empty tab-row space after them is a
   // window-drag region (term-tabs has data-tauri-drag-region)
   if (addBtn) bar.appendChild(addBtn);
+  if (addMenuBtn) bar.appendChild(addMenuBtn);
   sizeTabs();
 }
 
@@ -333,7 +385,7 @@ function sizeTabs() {
   // grow:1 .appbar-drag sibling). Reserve the traffic-light pad, cwd label, the
   // ＋ button, and a drag strip; the tabs share whatever's left.
   const appbar = document.querySelector(".appbar");
-  const addW = $("#tab-add")?.offsetWidth || 30;
+  const addW = ($("#tab-add")?.offsetWidth || 30) + ($("#tab-add-menu")?.offsetWidth || 18);
   const cwdW = $("#cwd-label")?.offsetWidth || 0;
   const dragStrip = 32;                                   // always keep a window-drag strip after the tabs
   const avail = (appbar?.clientWidth || window.innerWidth) - 90 /*L+R pad*/ - cwdW - addW - dragStrip - 4 * n;
@@ -1043,9 +1095,9 @@ function createTabShell(name) {
   tabs.set(id, tab);
   return tab;
 }
-function createTab(name) {
+function createTab(name, cwd) {
   const tab = createTabShell(name);
-  const pane = createLeafPane(tab.id);
+  const pane = createLeafPane(tab.id, cwd);
   tab.root = { paneId: pane.id };
   tab.activeLeaf = pane.id;
   layoutTab(tab);
@@ -2306,6 +2358,11 @@ async function init() {
   $("#compose-input").addEventListener("input", () => autoGrow($("#compose-input")));
   $("#btn-theme").addEventListener("click", () => setTheme(currentTheme === "light" ? "dark" : "light"));
   $("#tab-add").addEventListener("click", newTab);
+  $("#tab-add-menu").addEventListener("click", (e) => {
+    e.stopPropagation();
+    const r = e.currentTarget.getBoundingClientRect();
+    openAddMenu(r.left, r.bottom + 4);
+  });
   // strips are rebuilt on every layout, so listen on the container instead
   $("#terms").addEventListener("click", (e) => {
     const strip = e.target.closest?.(".pane-collapsed");
@@ -2336,6 +2393,7 @@ async function init() {
       if (t?.hasSelection()) { e.preventDefault(); copyText(selectionGrid(t)).then((ok) => ok && status("copied")); }
     }
     else if (k === "t") { e.preventDefault(); newTab(); }
+    else if (k === "o" && e.shiftKey) { e.preventDefault(); pickFolder(); }
     else if (k === "e") { e.preventDefault(); enhanceActive(); }
     else if (k === "b") { e.preventDefault(); setPanel($("#panel").classList.contains("hidden")); }
     else if (k === "w") { e.preventDefault(); closeLeaf(activeId); }
