@@ -286,6 +286,7 @@ async function openFolderInNewTab(path) {
   rememberFolder(path);
   const tab = createTab(null, path);
   activeTab = tab.id;
+  renderTermTabs(); // match every other tab-creating path — the new tab button must appear now, not whenever syncProjectDir next happens to fire
   showActive();
   scheduleSave();
 }
@@ -294,7 +295,24 @@ async function pickFolder() {
   if (typeof picked === "string") await openFolderInNewTab(picked);
 }
 // ▾ next to ＋: open-folder plus the recent list
+// bumped on every openAddMenu call and by closeMenu(); a build only renders if its
+// token is still current when its awaits resolve — so a second ▾ click (or an
+// Escape/outside-click dismiss) while one build is in flight can't interleave DOM
+// writes with it or pop the menu open again after the user cancelled
+let addMenuToken = 0;
 async function openAddMenu(x, y) {
+  const token = ++addMenuToken;
+  const home = await homeDir().catch(() => "");
+  const paths = loadRecents();
+  // a folder can be deleted or unmounted after we recorded it — filter at render
+  // time rather than pruning the store, so a temporary absence isn't permanent.
+  // Check every entry concurrently (was up to 15 sequential IPC round-trips before
+  // the menu could show); Promise.all resolves in array order, so the newest-first
+  // order from loadRecents() survives the filter.
+  const exists = await Promise.all(paths.map((p) => invoke("path_is_dir", { path: p }).catch(() => false)));
+  if (token !== addMenuToken) return; // superseded by a newer build, or dismissed while this was loading
+  const recents = paths.filter((_, i) => exists[i]);
+
   const menu = $("#ctx");
   menu.innerHTML = "";
   const item = (glyph, label, fn, hint) => {
@@ -306,13 +324,6 @@ async function openAddMenu(x, y) {
     menu.appendChild(r);
   };
   item("📂", "Open folder…", pickFolder, "⌘⇧O");
-  const home = await homeDir().catch(() => "");
-  // a folder can be deleted or unmounted after we recorded it — filter at render
-  // time rather than pruning the store, so a temporary absence isn't permanent
-  const recents = [];
-  for (const p of loadRecents()) {
-    if (await invoke("path_is_dir", { path: p }).catch(() => false)) recents.push(p);
-  }
   if (recents.length) {
     menu.appendChild(el("div", "ctx-sep"));
     menu.appendChild(el("div", "ctx-head", "RECENT"));
@@ -1331,6 +1342,7 @@ async function enhanceActive() {
 // ---------- context menu (right-click a pane, or the Split button) ----------
 let menuOnClose = null;
 function closeMenu() {
+  addMenuToken++; // invalidate any ▾ build still in flight so it can't pop the menu open after this dismiss
   $("#ctx").classList.add("hidden");
   const f = menuOnClose;
   menuOnClose = null;
